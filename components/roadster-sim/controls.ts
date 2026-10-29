@@ -27,3 +27,26 @@ export function toControlInput(keys: ReadonlySet<string>): ControlInput {
     reset: keys.has("KeyR"),
   };
 }
+
+/**
+ * Which attitude jets fire. Each pushes the part of the car it sits on away from the direction it
+ * points: a jet on the left flank firing down lifts the left side, which rolls the car to the right.
+ */
+export type AttitudeJets = {
+  leftFlankDown: boolean;
+  rightFlankDown: boolean;
+  noseDown: boolean;
+  noseUp: boolean;
+};
+
+export function attitudeJets(
+  input: Pick<ControlInput, "pitch" | "roll">,
+  airborne: boolean
+): AttitudeJets {
+  return {
+    leftFlankDown: airborne && input.roll > 0,
+    rightFlankDown: airborne && input.roll < 0,
+    noseDown: airborne && input.pitch > 0,
+    noseUp: airborne && input.pitch < 0,
+  };
+}

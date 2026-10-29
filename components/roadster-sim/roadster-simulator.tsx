@@ -11,7 +11,7 @@ import {
   type SimState,
 } from "@/lib/roadster-sim";
 
-import { HANDLED_KEYS, toControlInput } from "./controls";
+import { HANDLED_KEYS, attitudeJets, toControlInput } from "./controls";
 import { createRoadsterScene } from "./scene";
 
 const STEP = 1 / 120;
@@ -101,7 +101,11 @@ export function RoadsterSimulator() {
         accumulator -= STEP;
       }
 
-      scene.update(state, thrusting, elapsed);
+      scene.update(
+        state,
+        { mainThrust: thrusting, jets: attitudeJets(input, state.mode === "airborne") },
+        elapsed
+      );
 
       if (now - lastHudTime >= HUD_INTERVAL_MS) {
         lastHudTime = now;

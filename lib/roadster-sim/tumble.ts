@@ -1,4 +1,4 @@
-import { groundHeightAt, groundNormalAt } from "./map";
+import { OBSTACLES, groundHeightAt, groundNormalAt, rampHeightAt } from "./map";
 import {
   add,
   cross,
@@ -23,12 +23,16 @@ export const CENTER_OF_MASS = vec(0, 0.55, 0);
 const HALF_WIDTH = 0.95;
 const HEIGHT = 1.1;
 const HALF_LENGTH = 2.15;
+const HOOD_HEIGHT = 0.65;
 
-const CORNERS: readonly Vec3[] = [0, HEIGHT].flatMap((y) =>
-  [-HALF_WIDTH, HALF_WIDTH].flatMap((x) =>
-    [-HALF_LENGTH, HALF_LENGTH].map((z) => vec(x, y, z))
-  )
-);
+// Low nose and tail with a cabin set back from both ends, so a head-on hit lands below the car's
+// center of mass and pitches the tail up instead of stopping it flat.
+const CORNERS: readonly Vec3[] = [
+  ...[0, HOOD_HEIGHT].flatMap((y) =>
+    [-HALF_WIDTH, HALF_WIDTH].flatMap((x) => [-HALF_LENGTH, HALF_LENGTH].map((z) => vec(x, y, z)))
+  ),
+  ...[-1.1, 0.8].flatMap((z) => [-0.8, 0.8].map((x) => vec(x, HEIGHT, z))),
+];
 
 // Inverse principal moments of a uniform box of unit mass.
 const INVERSE_INERTIA = vec(
@@ -39,6 +43,7 @@ const INVERSE_INERTIA = vec(
 
 const GRAVITY = 9.81;
 const RESTITUTION = 0.25;
+const BODY_RESTITUTION = 0.15;
 const BOUNCE_THRESHOLD = 1.5;
 const FRICTION = 0.6;
 const ANGULAR_DAMPING = 0.15;
@@ -77,6 +82,40 @@ function impulseResponse(orientation: Quat, r: Vec3, direction: Vec3): number {
   return 1 + dot(angular, direction);
 }
 
+type Contact = { normal: Vec3; penetration: number; restitution: number };
+
+/**
+ * A body corner that is inside a parked car, with the face it should be pushed out through. Only
+ * faces the corner is moving into are candidates, because the shallowest face is often the wrong
+ * one: the roadster is almost as wide as a parked car, so a head-on hit is barely inside its sides.
+ */
+function obstacleContact(p: Vec3, velocity: Vec3): Contact | undefined {
+  for (const o of OBSTACLES) {
+    const dx = o.sizeX / 2 - Math.abs(p.x - o.x);
+    const dz = o.sizeZ / 2 - Math.abs(p.z - o.z);
+    const dy = o.height - p.y;
+    if (dx <= 0 || dz <= 0 || dy <= 0) continue;
+
+    const faces: Contact[] = [
+      { normal: vec(0, 1, 0), penetration: dy, restitution: RESTITUTION },
+      { normal: vec(Math.sign(p.x - o.x), 0, 0), penetration: dx, restitution: BODY_RESTITUTION },
+      { normal: vec(0, 0, Math.sign(p.z - o.z)), penetration: dz, restitution: BODY_RESTITUTION },
+    ];
+    const entered = faces.filter((face) => dot(face.normal, velocity) < 0);
+    const candidates = entered.length > 0 ? entered : faces;
+    return candidates.reduce((best, face) => (face.penetration < best.penetration ? face : best));
+  }
+  return undefined;
+}
+
+/** True when a body corner has run into the side of a parked car rather than landing on top of it. */
+export function hitsObstacleSide(position: Vec3, orientation: Quat, velocity: Vec3): boolean {
+  return CORNERS.some((corner) => {
+    const contact = obstacleContact(worldCorner(position, orientation, corner), velocity);
+    return contact !== undefined && contact.normal.y === 0;
+  });
+}
+
 /**
  * Advances a car that is bouncing and rolling after a rough landing. The body is a rigid box whose
  * corners collide with the ground; `angularVelocity` is in the world frame while tumbling.
@@ -94,24 +133,37 @@ export function stepTumbling(state: SimState, dt: number): SimState {
   );
   position = sub(com, rotate(orientation, CENTER_OF_MASS));
 
-  // Collect every corner that is touching or sinking into the ground, then resolve them together
-  // so a level landing stays level instead of tipping toward whichever corner is processed first.
-  const touching: Array<{ corner: Vec3; normal: Vec3; penetration: number }> = [];
-  let deepest = 0;
+  // Collect every corner that is touching or sinking into the ground or a parked car, then resolve
+  // them together so a level landing stays level instead of tipping toward whichever is first.
+  const touching: Array<Contact & { corner: Vec3 }> = [];
   for (const corner of CORNERS) {
     const p = worldCorner(position, orientation, corner);
-    const penetration = groundHeightAt(p.x, p.z) - p.y;
-    if (penetration < -CONTACT_MARGIN) continue;
-    touching.push({ corner, normal: groundNormalAt(p.x, p.z), penetration });
-    deepest = Math.max(deepest, penetration);
+    const groundPenetration = rampHeightAt(p.x, p.z) - p.y;
+    if (groundPenetration >= -CONTACT_MARGIN) {
+      touching.push({
+        corner,
+        normal: groundNormalAt(p.x, p.z),
+        penetration: groundPenetration,
+        restitution: RESTITUTION,
+      });
+    }
+    const body = obstacleContact(p, velocity);
+    if (body) touching.push({ corner, ...body });
   }
-  position = add(position, vec(0, deepest * PENETRATION_CORRECTION, 0));
+  const pushedOut = touching.filter((contact) => contact.penetration > 0);
+  if (pushedOut.length > 0) {
+    const total = pushedOut.reduce(
+      (sum, contact) => add(sum, scale(contact.normal, contact.penetration)),
+      vec(0, 0, 0)
+    );
+    position = add(position, scale(total, PENETRATION_CORRECTION / pushedOut.length));
+  }
 
   const center = add(position, rotate(orientation, CENTER_OF_MASS));
-  const contacts = touching.map(({ corner, normal }) => {
+  const contacts = touching.map(({ corner, normal, restitution }) => {
     const r = sub(worldCorner(position, orientation, corner), center);
     const approach = dot(add(velocity, cross(angularVelocity, r)), normal);
-    const bounce = approach < -BOUNCE_THRESHOLD ? -RESTITUTION * approach : 0;
+    const bounce = approach < -BOUNCE_THRESHOLD ? -restitution * approach : 0;
     return { r, normal, bounce };
   });
 

@@ -1,5 +1,5 @@
-import { MAP_HALF_SIZE, groundHeightAt, groundNormalAt, obstacleAt } from "./map";
-import { CENTER_OF_MASS, lowestClearance, stepTumbling } from "./tumble";
+import { MAP_HALF_SIZE, groundHeightAt, groundNormalAt } from "./map";
+import { CENTER_OF_MASS, hitsObstacleSide, lowestClearance, stepTumbling } from "./tumble";
 import {
   IDENTITY,
   add,
@@ -73,15 +73,13 @@ const ORIENTATION_BLEND_RATE = 14;
 
 const THRUST_ACCELERATION = 16;
 const THRUST_AIR_BURN_PER_SECOND = 0.4;
-const THRUST_AIR_REGEN_PER_SECOND = 0.06;
+const THRUST_AIR_REGEN_PER_SECOND = 0.2;
 const AIR_CONTROL_AUTHORITY = 9;
 const MAX_ANGULAR_SPEED = 4;
 const ANGULAR_DAMPING = 0.6;
 const AIR_DRAG = 0.02;
 const LEVEL_LANDING_TILT_COS = Math.cos((25 * Math.PI) / 180);
 const HARD_IMPACT_SPEED = 15;
-const OBSTACLE_SIDE_CLEARANCE = 0.3;
-const STEP_UP_LIMIT = 0.4;
 const LIFT_OFF_TOLERANCE = 0.05;
 
 export function createSimulation(): SimState {
@@ -168,8 +166,8 @@ function stepDriving(state: SimState, input: ControlInput, dt: number): SimState
   const groundY = groundHeightAt(moved.x, moved.z);
   const thrustAir = Math.min(1, state.thrustAir + THRUST_AIR_REGEN_PER_SECOND * dt);
 
-  if (groundY - moved.y > STEP_UP_LIMIT) {
-    return { ...state, heading, thrustAir, velocity: vec(0, 0, 0) };
+  if (hitsObstacleSide(moved, state.orientation, velocity)) {
+    return { ...state, mode: "tumbling", heading, thrustAir, velocity, restTime: 0 };
   }
   if (isOutOfBounds(moved)) {
     return { ...state, mode: "lost", heading, thrustAir, position: moved, velocity };
@@ -235,9 +233,13 @@ function stepAirborne(state: SimState, input: ControlInput, dt: number): SimStat
     thrustAir,
   };
 
-  const hit = obstacleAt(moved.x, moved.z);
-  if (hit && moved.y < hit.height - OBSTACLE_SIDE_CLEARANCE) {
-    return { ...next, position: state.position, velocity: vec(0, velocity.y, 0) };
+  if (hitsObstacleSide(moved, orientation, velocity)) {
+    return {
+      ...next,
+      mode: "tumbling",
+      angularVelocity: rotate(orientation, angularVelocity),
+      restTime: 0,
+    };
   }
   if (isOutOfBounds(moved)) return { ...next, mode: "lost" };
 

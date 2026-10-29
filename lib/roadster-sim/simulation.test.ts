@@ -138,11 +138,11 @@ describe("추진 도약", () => {
     expect(speedOf(accelerated)).toBeGreaterThan(speedOf(landed));
   });
 
-  it("지면에서 서서히 추진 공기가 회복된다", () => {
+  it("지면에서 추진 공기가 5초 안에 가득 찰 만큼 빠르게 회복된다", () => {
     const spent = { ...createSimulation(), thrustAir: 0.2 };
-    const recovered = run(spent, 5, {});
+    const recovered = run(spent, 2, {});
 
-    expect(recovered.thrustAir).toBeGreaterThan(0.2);
+    expect(recovered.thrustAir).toBeGreaterThan(0.5);
     expect(recovered.thrustAir).toBeLessThanOrEqual(1);
   });
 });
@@ -211,12 +211,69 @@ describe("램프와 주차 차량", () => {
     expect(firstLandingZ).toBeGreaterThan(105);
   });
 
-  it("주차 차량 옆면에 지면에서 부딪히면 통과하지 못하고 멈춘다", () => {
-    const start: SimState = { ...createSimulation(), position: { x: 0, y: 0, z: 62 } };
-    const crashed = run(start, 3, { throttle: 1 });
+});
 
-    expect(crashed.position.z).toBeLessThan(78);
-    expect(speedOf(crashed)).toBeLessThan(1);
+describe("주차 차량 충돌", () => {
+  const nearCars = (z: number, speed: number): SimState => ({
+    ...createSimulation(),
+    position: { x: 0, y: 0, z },
+    velocity: { x: 0, y: 0, z: speed },
+  });
+
+  const observe = (start: SimState, seconds: number, input: Partial<ControlInput> = {}) => {
+    const modes = new Set<string>();
+    let maxZ = -Infinity;
+    let minVelocityZ = Infinity;
+    const end = run(start, seconds, (s) => {
+      modes.add(s.mode);
+      maxZ = Math.max(maxZ, s.position.z);
+      minVelocityZ = Math.min(minVelocityZ, s.velocity.z);
+      return input;
+    });
+    return { end, modes, maxZ, minVelocityZ };
+  };
+
+  it("빠르게 달려 부딪히면 통과하지 못하고 튕겨 나오며 구른 뒤 멈춘다", () => {
+    const { end, modes, maxZ, minVelocityZ } = observe(nearCars(62, 25), 8);
+
+    expect(modes.has("tumbling")).toBe(true);
+    expect(maxZ).toBeLessThan(77.5);
+    expect(minVelocityZ).toBeLessThan(-1);
+    expect(["driving", "overturned"]).toContain(end.mode);
+  });
+
+  it("약하게 닿으면 살짝 밀려난 뒤 다시 주행 입력에 반응한다", () => {
+    const { end, maxZ } = observe(nearCars(70, 3), 6);
+    expect(maxZ).toBeLessThan(77.5);
+    expect(end.mode).toBe("driving");
+
+    const driven = run(end, 1, { throttle: -1 });
+    expect(speedOf(driven)).toBeGreaterThan(1);
+  });
+
+  it("공중에서 옆면에 부딪혀도 통과하지 않고 튕겨 떨어진다", () => {
+    const flying: SimState = {
+      ...nearCars(68, 20),
+      mode: "airborne",
+      position: { x: 0, y: 0.9, z: 68 },
+    };
+    const { end, modes, maxZ } = observe(flying, 8);
+
+    expect(modes.has("tumbling")).toBe(true);
+    expect(maxZ).toBeLessThan(77.5);
+    expect(["driving", "overturned"]).toContain(end.mode);
+  });
+
+  it("차 지붕 위에는 반듯하게 내려앉아 계속 달릴 수 있다", () => {
+    const above: SimState = {
+      ...createSimulation(),
+      mode: "airborne",
+      position: { x: 0, y: 3.5, z: 90 },
+    };
+    const landed = run(above, 2, {});
+
+    expect(landed.mode).toBe("driving");
+    expect(landed.position.y).toBeCloseTo(1.5, 1);
   });
 });
 

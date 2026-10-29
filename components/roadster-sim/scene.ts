@@ -1,5 +1,6 @@
 import * as THREE from "three";
 
+import type { AttitudeJets } from "./controls";
 import {
   MAP_HALF_SIZE,
   OBSTACLES,
@@ -8,8 +9,10 @@ import {
   type SimState,
 } from "@/lib/roadster-sim";
 
+export type SceneEffects = { mainThrust: boolean; jets: AttitudeJets };
+
 export type RoadsterScene = {
-  update: (state: SimState, thrusting: boolean, dt: number) => void;
+  update: (state: SimState, effects: SceneEffects, dt: number) => void;
   resize: () => void;
   dispose: () => void;
 };
@@ -26,7 +29,7 @@ function box(w: number, h: number, d: number, color: number, y: number, z = 0) {
   return mesh;
 }
 
-function buildRoadster() {
+function buildRoadster(): THREE.Group {
   const group = new THREE.Group();
   group.add(box(1.9, 0.45, 4.3, BODY_RED, 0.58));
   group.add(box(1.7, 0.3, 1.8, BODY_RED, 0.95, -0.2));
@@ -46,30 +49,7 @@ function buildRoadster() {
     group.add(wheel);
   }
 
-  const plumeGeometry = new THREE.ConeGeometry(0.2, 2.2, 12);
-  const plumeMaterial = new THREE.MeshBasicMaterial({
-    color: 0xe8f4ff,
-    transparent: true,
-    opacity: 0.75,
-  });
-  const plumes = new THREE.Group();
-  for (const x of [-0.7, -0.25, 0.25, 0.7]) {
-    const plume = new THREE.Mesh(plumeGeometry, plumeMaterial);
-    plume.rotation.x = -Math.PI / 2;
-    plume.position.set(x, 0.65, -3.3);
-    plumes.add(plume);
-  }
-  for (const z of [-0.8, 0.8]) {
-    const plume = new THREE.Mesh(plumeGeometry, plumeMaterial);
-    plume.position.set(0, -0.5, z);
-    plume.scale.set(1.3, 0.8, 1.3);
-    plume.rotation.x = Math.PI;
-    plume.position.y = 0.15;
-    plumes.add(plume);
-  }
-  plumes.visible = false;
-  group.add(plumes);
-  return { group, plumes };
+  return group;
 }
 
 function buildRamp(ramp: Ramp) {
@@ -161,6 +141,108 @@ function buildWorld(scene: THREE.Scene) {
   });
 }
 
+type Nozzle = { at: [number, number, number]; aim: [number, number, number] };
+type Jet = { nozzles: Nozzle[]; speed: number; life: number; size: number; perSecond: number };
+
+// Thin white condensation trails from compressed air, like the demo footage: fast, narrow, quickly
+// spreading and fading, rather than a solid flame.
+const MAIN_JETS: Jet[] = [
+  {
+    nozzles: [-0.7, -0.25, 0.25, 0.7].map((x) => ({ at: [x, 0.62, -2.2], aim: [0, 0.05, -1] })),
+    speed: 16,
+    life: 1.1,
+    size: 0.28,
+    perSecond: 45,
+  },
+  {
+    nozzles: [-0.45, 0.45].map((x) => ({ at: [x, 0.08, 0.2], aim: [0, -1, -0.1] })),
+    speed: 14,
+    life: 0.9,
+    size: 0.3,
+    perSecond: 40,
+  },
+];
+
+const ATTITUDE_NOZZLES: Record<keyof AttitudeJets, Nozzle> = {
+  leftFlankDown: { at: [1.0, 0.5, 0.2], aim: [0.45, -1, 0] },
+  rightFlankDown: { at: [-1.0, 0.5, 0.2], aim: [-0.45, -1, 0] },
+  noseDown: { at: [0, 0.35, 2.15], aim: [0, -1, 0.35] },
+  noseUp: { at: [0, 0.9, 1.9], aim: [0, 1, 0.35] },
+};
+
+const MAX_VAPOR = 420;
+
+function createVaporTexture() {
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  if (context) {
+    const gradient = context.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    gradient.addColorStop(0, "rgba(255,255,255,1)");
+    gradient.addColorStop(0.5, "rgba(255,255,255,0.45)");
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, size, size);
+  }
+  return new THREE.CanvasTexture(canvas);
+}
+
+type Puff = { sprite: THREE.Sprite; velocity: THREE.Vector3; age: number; life: number; size: number };
+
+function createVapor(scene: THREE.Scene) {
+  const texture = createVaporTexture();
+  const puffs: Puff[] = Array.from({ length: MAX_VAPOR }, () => {
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0, depthWrite: false })
+    );
+    sprite.visible = false;
+    scene.add(sprite);
+    return { sprite, velocity: new THREE.Vector3(), age: 0, life: 0, size: 0 };
+  });
+  let cursor = 0;
+
+  const emit = (origin: THREE.Vector3, direction: THREE.Vector3, carVelocity: THREE.Vector3, jet: Pick<Jet, "speed" | "life" | "size">) => {
+    const puff = puffs[cursor];
+    cursor = (cursor + 1) % puffs.length;
+    puff.age = 0;
+    puff.life = jet.life * (0.7 + Math.random() * 0.6);
+    puff.size = jet.size;
+    puff.velocity
+      .copy(direction)
+      .multiplyScalar(jet.speed * (0.8 + Math.random() * 0.4))
+      .addScaledVector(carVelocity, 0.35)
+      .add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(1.6));
+    puff.sprite.position.copy(origin);
+    puff.sprite.visible = true;
+  };
+
+  const advance = (dt: number) => {
+    const drag = Math.exp(-1.6 * dt);
+    for (const puff of puffs) {
+      if (!puff.sprite.visible) continue;
+      puff.age += dt;
+      if (puff.age >= puff.life) {
+        puff.sprite.visible = false;
+        continue;
+      }
+      const t = puff.age / puff.life;
+      puff.velocity.multiplyScalar(drag);
+      puff.sprite.position.addScaledVector(puff.velocity, dt);
+      puff.sprite.scale.setScalar(puff.size * (1 + 4 * t));
+      (puff.sprite.material as THREE.SpriteMaterial).opacity = 0.7 * (1 - t) ** 1.5;
+    }
+  };
+
+  const dispose = () => {
+    puffs.forEach((puff) => puff.sprite.material.dispose());
+    texture.dispose();
+  };
+
+  return { emit, advance, dispose };
+}
+
 export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -168,7 +250,9 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
   const scene = new THREE.Scene();
   buildWorld(scene);
   const roadster = buildRoadster();
-  scene.add(roadster.group);
+  scene.add(roadster);
+  const vapor = createVapor(scene);
+  let emitDebt = 0;
 
   const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 900);
   const lookTarget = new THREE.Vector3();
@@ -184,12 +268,38 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
   };
   resize();
 
-  const update = (state: SimState, thrusting: boolean, dt: number) => {
+  const emitVapor = (effects: SceneEffects, state: SimState, dt: number) => {
+    const carVelocity = new THREE.Vector3(state.velocity.x, state.velocity.y, state.velocity.z);
+    emitDebt += dt;
+    const spawn = (nozzle: Nozzle, jet: Pick<Jet, "speed" | "life" | "size">, count: number) => {
+      for (let i = 0; i < count; i++) {
+        const origin = roadster.localToWorld(new THREE.Vector3(...nozzle.at));
+        const direction = new THREE.Vector3(...nozzle.aim).normalize().applyQuaternion(roadster.quaternion);
+        emit(origin, direction, carVelocity, jet);
+      }
+    };
+    const emit = vapor.emit;
+    if (effects.mainThrust) {
+      for (const jet of MAIN_JETS) {
+        const count = Math.round(jet.perSecond * emitDebt);
+        for (const nozzle of jet.nozzles) spawn(nozzle, jet, count);
+      }
+    }
+    const small = { speed: 9, life: 0.55, size: 0.2 };
+    const count = Math.round(55 * emitDebt);
+    (Object.keys(ATTITUDE_NOZZLES) as Array<keyof AttitudeJets>).forEach((name) => {
+      if (effects.jets[name]) spawn(ATTITUDE_NOZZLES[name], small, count);
+    });
+    if (emitDebt > 0.02) emitDebt = 0;
+  };
+
+  const update = (state: SimState, effects: SceneEffects, dt: number) => {
     const { position, orientation, heading } = state;
-    roadster.group.position.set(position.x, position.y, position.z);
-    roadster.group.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
-    roadster.plumes.visible = thrusting;
-    if (thrusting) roadster.plumes.scale.setScalar(0.8 + Math.random() * 0.4);
+    roadster.position.set(position.x, position.y, position.z);
+    roadster.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+    roadster.updateMatrixWorld();
+    emitVapor(effects, state, dt);
+    vapor.advance(dt);
 
     // On the ground the camera follows the car's heading. In the air the body can pitch through
     // vertical, which flips its heading, so follow the direction of travel and keep the car in view.
@@ -233,6 +343,7 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
         materials.forEach((m) => m.dispose());
       }
     });
+    vapor.dispose();
     renderer.dispose();
   };
 
