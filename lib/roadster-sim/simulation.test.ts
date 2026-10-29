@@ -311,19 +311,40 @@ describe("거친 착지", () => {
     expect(speedOf(end)).toBeLessThan(0.5);
   });
 
-  it("큰 충격으로 떨어지면 차체가 덜컹거린 뒤 바퀴로 서서 다시 주행한다", () => {
+  it("아주 높은 곳에서 반듯하게 떨어져도 착지 직후 멈추지 않고 바로 가속할 수 있다", () => {
     const fall: SimState = {
       ...openField(),
       mode: "airborne",
       position: { x: 60, y: 40, z: -100 },
+      velocity: { x: 0, y: 0, z: 20 },
     };
-    const { end, modes } = record(fall, 12);
+    const landed = run(fall, 4, {});
+    expect(landed.mode).toBe("driving");
+    expect(speedOf(landed)).toBeGreaterThan(10);
 
-    expect(modes.has("tumbling")).toBe(true);
-    expect(end.mode).toBe("driving");
+    const accelerated = run(landed, 1, { throttle: 1 });
+    expect(speedOf(accelerated)).toBeGreaterThan(speedOf(landed));
+  });
 
-    const accelerated = run(end, 1, { throttle: 1 });
-    expect(speedOf(accelerated)).toBeGreaterThan(5);
+  it("기울어 착지해 구르다가 바퀴로 서면, 멈추기를 기다리지 않고 속도가 남은 채 주행을 이어 간다", () => {
+    const half = 0.52 / 2;
+    const tilted: SimState = {
+      ...openField(),
+      mode: "airborne",
+      position: { x: 60, y: 3, z: -100 },
+      velocity: { x: 0, y: 0, z: 20 },
+      orientation: { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) },
+    };
+    let tumbled = false;
+    let resumedSpeed: number | undefined;
+    run(tilted, 6, (s) => {
+      if (s.mode === "tumbling") tumbled = true;
+      if (tumbled && s.mode === "driving" && resumedSpeed === undefined) resumedSpeed = speedOf(s);
+      return {};
+    });
+
+    expect(tumbled).toBe(true);
+    expect(resumedSpeed).toBeGreaterThan(5);
   });
 
   it("어떤 각도로 비스듬히 달려와 떨어져도 지면을 뚫지 않고 안정적으로 멈춘다", () => {

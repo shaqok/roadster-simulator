@@ -79,7 +79,6 @@ const MAX_ANGULAR_SPEED = 4;
 const ANGULAR_DAMPING = 0.6;
 const AIR_DRAG = 0.02;
 const LEVEL_LANDING_TILT_COS = Math.cos((25 * Math.PI) / 180);
-const HARD_IMPACT_SPEED = 15;
 const LIFT_OFF_TOLERANCE = 0.05;
 
 export function createSimulation(): SimState {
@@ -247,13 +246,12 @@ function stepAirborne(state: SimState, input: ControlInput, dt: number): SimStat
   return next;
 }
 
-/** A level, gentle touchdown keeps driving; anything else becomes a bouncing, rolling impact. */
+/** A level touchdown keeps driving however fast it was; a tilted one becomes a bouncing, rolling impact. */
 function touchDown(state: SimState): SimState {
   const normal = groundNormalAt(state.position.x, state.position.z);
   const { up } = bodyAxes(state);
-  const impactSpeed = -state.velocity.y;
 
-  if (dot(up, normal) >= LEVEL_LANDING_TILT_COS && impactSpeed < HARD_IMPACT_SPEED) {
+  if (dot(up, normal) >= LEVEL_LANDING_TILT_COS) {
     const groundY = groundHeightAt(state.position.x, state.position.z);
     return {
       ...state,

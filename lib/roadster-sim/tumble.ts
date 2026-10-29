@@ -84,6 +84,9 @@ function impulseResponse(orientation: Quat, r: Vec3, direction: Vec3): number {
 
 type Contact = { normal: Vec3; penetration: number; restitution: number };
 
+const UPRIGHT_HANDOFF_COS = Math.cos((20 * Math.PI) / 180);
+const WHEELS_DOWN_CONTACTS = 3;
+
 /**
  * A body corner that is inside a parked car, with the face it should be pushed out through. Only
  * faces the corner is moving into are candidates, because the shallowest face is often the wrong
@@ -203,7 +206,37 @@ export function stepTumbling(state: SimState, dt: number): SimState {
   const restTime = resting ? state.restTime + dt : 0;
 
   const next: SimState = { ...state, position, velocity, orientation, angularVelocity, restTime };
+
+  // Give control back as soon as the car is sitting level on its wheels, even if it is still moving.
+  const wheelsOnSurface = touching.filter(
+    (contact) => contact.corner.y === 0 && contact.normal.y > 0.9
+  ).length;
+  const hitSomethingSideways = touching.some((contact) => contact.normal.y < 0.5);
+  const up = rotate(orientation, vec(0, 1, 0));
+  const surface = groundNormalAt(position.x, position.z);
+  if (
+    wheelsOnSurface >= WHEELS_DOWN_CONTACTS &&
+    !hitSomethingSideways &&
+    dot(up, surface) >= UPRIGHT_HANDOFF_COS
+  ) {
+    return resumeDriving(next);
+  }
   return restTime >= REST_TIME ? settle(next) : next;
+}
+
+function resumeDriving(state: SimState): SimState {
+  const normal = groundNormalAt(state.position.x, state.position.z);
+  const forward = rotate(state.orientation, vec(0, 0, 1));
+  const heading = Math.hypot(forward.x, forward.z) > 0.5 ? Math.atan2(forward.x, forward.z) : state.heading;
+  return {
+    ...state,
+    mode: "driving",
+    heading,
+    position: vec(state.position.x, groundHeightAt(state.position.x, state.position.z), state.position.z),
+    velocity: sub(state.velocity, scale(normal, dot(state.velocity, normal))),
+    angularVelocity: vec(0, 0, 0),
+    restTime: 0,
+  };
 }
 
 function settle(state: SimState): SimState {
