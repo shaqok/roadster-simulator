@@ -26,6 +26,8 @@ function box(w: number, h: number, d: number, color: number, y: number, z = 0) {
     new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.2 })
   );
   mesh.position.set(0, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   return mesh;
 }
 
@@ -46,6 +48,7 @@ function buildRoadster(): THREE.Group {
   ]) {
     const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
     wheel.position.set(x, 0.34, z);
+    wheel.castShadow = true;
     group.add(wheel);
   }
 
@@ -66,17 +69,32 @@ function buildRamp(ramp: Ramp) {
     new THREE.MeshStandardMaterial({ color: 0x4a4d57, roughness: 0.7 })
   );
   mesh.position.set(ramp.x, 0, ramp.z0);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   return mesh;
 }
+
+/** Sun position relative to the car; the shadow camera follows the car so shadows stay sharp. */
+const SUN_OFFSET = new THREE.Vector3(18, 120, -10);
 
 function buildWorld(scene: THREE.Scene) {
   scene.background = new THREE.Color(0xa9c8e8);
   scene.fog = new THREE.Fog(0xa9c8e8, 80, 420);
 
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x6b7a5c, 1.1));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-  sun.position.set(60, 120, -40);
-  scene.add(sun);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x6b7a5c, 0.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.6);
+  sun.position.set(SUN_OFFSET.x, SUN_OFFSET.y, SUN_OFFSET.z);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -45;
+  sun.shadow.camera.right = 45;
+  sun.shadow.camera.top = 45;
+  sun.shadow.camera.bottom = -45;
+  sun.shadow.camera.near = 10;
+  sun.shadow.camera.far = 400;
+  sun.shadow.bias = -0.0004;
+  sun.shadow.normalBias = 0.04;
+  scene.add(sun, sun.target);
 
   const size = MAP_HALF_SIZE * 2;
   const ground = new THREE.Mesh(
@@ -85,6 +103,7 @@ function buildWorld(scene: THREE.Scene) {
   );
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.02;
+  ground.receiveShadow = true;
   scene.add(ground);
 
   const road = new THREE.Mesh(
@@ -93,6 +112,7 @@ function buildWorld(scene: THREE.Scene) {
   );
   road.rotation.x = -Math.PI / 2;
   road.position.y = 0;
+  road.receiveShadow = true;
   scene.add(road);
 
   const dashCount = Math.floor(size / 8);
@@ -139,6 +159,8 @@ function buildWorld(scene: THREE.Scene) {
     car.position.set(obstacle.x, 0, obstacle.z);
     scene.add(car);
   });
+
+  return { sun };
 }
 
 type Nozzle = { at: [number, number, number]; aim: [number, number, number] };
@@ -148,18 +170,18 @@ type Jet = { nozzles: Nozzle[]; speed: number; life: number; size: number; perSe
 // spreading and fading, rather than a solid flame.
 const MAIN_JETS: Jet[] = [
   {
-    nozzles: [-0.7, -0.25, 0.25, 0.7].map((x) => ({ at: [x, 0.62, -2.2], aim: [0, 0.05, -1] })),
-    speed: 16,
-    life: 1.1,
-    size: 0.28,
+    // Four nozzles in the belly fire straight down, as in the footage: fat columns of vapor that
+    // spread into a cloud when they reach the ground.
+    nozzles: [
+      [-0.6, 1.0],
+      [0.6, 1.0],
+      [-0.6, -1.0],
+      [0.6, -1.0],
+    ].map(([x, z]) => ({ at: [x, 0.1, z], aim: [0, -1, 0] })),
+    speed: 13,
+    life: 1.5,
+    size: 0.5,
     perSecond: 45,
-  },
-  {
-    nozzles: [-0.45, 0.45].map((x) => ({ at: [x, 0.08, 0.2], aim: [0, -1, -0.1] })),
-    speed: 14,
-    life: 0.9,
-    size: 0.3,
-    perSecond: 40,
   },
 ];
 
@@ -170,7 +192,9 @@ const ATTITUDE_NOZZLES: Record<keyof AttitudeJets, Nozzle> = {
   noseUp: { at: [0, 0.9, 1.9], aim: [0, 1, 0.35] },
 };
 
-const MAX_VAPOR = 420;
+const MAX_VAPOR = 520;
+const GROUND_CLOUD_HEIGHT = 0.3;
+const GROUND_CLOUD_REACH = 7;
 
 function createVaporTexture() {
   const size = 64;
@@ -212,7 +236,7 @@ function createVapor(scene: THREE.Scene) {
     puff.velocity
       .copy(direction)
       .multiplyScalar(jet.speed * (0.8 + Math.random() * 0.4))
-      .addScaledVector(carVelocity, 0.35)
+      .addScaledVector(carVelocity, 0.1)
       .add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(1.6));
     puff.sprite.position.copy(origin);
     puff.sprite.visible = true;
@@ -230,6 +254,12 @@ function createVapor(scene: THREE.Scene) {
       const t = puff.age / puff.life;
       puff.velocity.multiplyScalar(drag);
       puff.sprite.position.addScaledVector(puff.velocity, dt);
+      if (puff.sprite.position.y < GROUND_CLOUD_HEIGHT) {
+        puff.sprite.position.y = GROUND_CLOUD_HEIGHT;
+        puff.velocity.y = 0;
+        puff.velocity.x *= 1 + 0.6 * dt;
+        puff.velocity.z *= 1 + 0.6 * dt;
+      }
       puff.sprite.scale.setScalar(puff.size * (1 + 4 * t));
       (puff.sprite.material as THREE.SpriteMaterial).opacity = 0.7 * (1 - t) ** 1.5;
     }
@@ -246,9 +276,11 @@ function createVapor(scene: THREE.Scene) {
 export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const scene = new THREE.Scene();
-  buildWorld(scene);
+  const { sun } = buildWorld(scene);
   const roadster = buildRoadster();
   scene.add(roadster);
   const vapor = createVapor(scene);
@@ -285,6 +317,20 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
         for (const nozzle of jet.nozzles) spawn(nozzle, jet, count);
       }
     }
+    if (effects.mainThrust && state.position.y < GROUND_CLOUD_REACH) {
+      const still = new THREE.Vector3();
+      const cloud = { speed: 4.5, life: 1.8, size: 1.1 };
+      const puffs = Math.round(28 * emitDebt);
+      for (let i = 0; i < puffs; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const origin = new THREE.Vector3(
+          state.position.x + (Math.random() - 0.5) * 2,
+          GROUND_CLOUD_HEIGHT,
+          state.position.z + (Math.random() - 0.5) * 3
+        );
+        emit(origin, new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle)), still, cloud);
+      }
+    }
     const small = { speed: 9, life: 0.55, size: 0.2 };
     const count = Math.round(55 * emitDebt);
     (Object.keys(ATTITUDE_NOZZLES) as Array<keyof AttitudeJets>).forEach((name) => {
@@ -298,6 +344,8 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
     roadster.position.set(position.x, position.y, position.z);
     roadster.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
     roadster.updateMatrixWorld();
+    sun.target.position.set(position.x, 0, position.z);
+    sun.position.set(position.x + SUN_OFFSET.x, SUN_OFFSET.y, position.z + SUN_OFFSET.z);
     emitVapor(effects, state, dt);
     vapor.advance(dt);
 
