@@ -4,9 +4,11 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import type { AttitudeJets } from "./controls";
 import {
   MAGOK_MAP,
+  MAGOK_NETWORK,
   MAP_HALF_SIZE,
   OBSTACLES,
   RAMPS,
+  laneMarkings,
   type Ramp,
   type SimState,
 } from "@/lib/roadster-sim";
@@ -225,9 +227,10 @@ function buildRamp(ramp: Ramp) {
   geometry.rotateY(-Math.PI / 2);
   const mesh = new THREE.Mesh(
     geometry,
-    new THREE.MeshStandardMaterial({ color: 0x4a4d57, roughness: 0.7 })
+    new THREE.MeshStandardMaterial({ color: 0x8a8d98, roughness: 0.7 })
   );
   mesh.position.set(ramp.x, 0, ramp.z0);
+  mesh.rotation.y = ramp.heading ?? 0;
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;
@@ -291,6 +294,85 @@ function buildRoads() {
   );
   mesh.receiveShadow = true;
   return mesh;
+}
+
+const MARKING_COLORS = { white: new THREE.Color(0xf0f0f0), yellow: new THREE.Color(0xe8b923) };
+/** Paint sits just above the road it belongs to; polygon offset keeps it from flickering at a distance. */
+const MARKING_LIFT = 0.025;
+
+/** Center lines, lane dividers and edge lines as flat quads, merged into one draw call. */
+function buildLaneMarkings() {
+  const positions: number[] = [];
+  const colors: number[] = [];
+
+  for (const marking of laneMarkings(MAGOK_NETWORK)) {
+    const dx = marking.x1 - marking.x0;
+    const dz = marking.z1 - marking.z0;
+    const length = Math.hypot(dx, dz);
+    if (length < 0.01) continue;
+    const nx = (-dz / length) * (marking.width / 2);
+    const nz = (dx / length) * (marking.width / 2);
+    const rank = Math.max(0, ROAD_RANK.indexOf(marking.roadClass));
+    const y = 0.01 + rank * 0.002 + MARKING_LIFT;
+    const color = MARKING_COLORS[marking.color];
+    const corners = [
+      [marking.x0 + nx, marking.z0 + nz],
+      [marking.x0 - nx, marking.z0 - nz],
+      [marking.x1 - nx, marking.z1 - nz],
+      [marking.x1 + nx, marking.z1 + nz],
+    ];
+    for (const index of [0, 1, 2, 0, 2, 3]) {
+      positions.push(corners[index][0], y, corners[index][1]);
+      colors.push(color.r, color.g, color.b);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    })
+  );
+  return mesh;
+}
+
+const TRAFFIC_COLORS = [0xd8d8dc, 0x20232a, 0x8a1f2b, 0x2b4c7e, 0x9aa0a8, 0x3f6b4a, 0xc7b27a, 0x5a3d6b];
+
+/** Boxy stand-ins for traffic cars, sharing geometry and one material per color. */
+function createTrafficFleet(scene: THREE.Scene) {
+  const bodyGeometry = new THREE.BoxGeometry(2, 0.9, 4.5);
+  const cabinGeometry = new THREE.BoxGeometry(1.7, 0.5, 2.25);
+  const cabinMaterial = new THREE.MeshStandardMaterial({ color: 0x10151c, roughness: 0.4, metalness: 0.3 });
+  const bodyMaterials = TRAFFIC_COLORS.map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.2 })
+  );
+  const cars: THREE.Group[] = [];
+
+  const ensure = (count: number) => {
+    while (cars.length < count) {
+      const index = cars.length;
+      const body = new THREE.Mesh(bodyGeometry, bodyMaterials[index % bodyMaterials.length]);
+      body.position.y = 0.65;
+      const cabin = new THREE.Mesh(cabinGeometry, cabinMaterial);
+      cabin.position.set(0, 1.25, -0.2);
+      for (const mesh of [body, cabin]) {
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+      }
+      const car = new THREE.Group();
+      car.add(body, cabin);
+      scene.add(car);
+      cars.push(car);
+    }
+  };
+  return { cars, ensure };
 }
 
 const ROOF_COLOR = new THREE.Color(0xd9dde3);
@@ -358,7 +440,7 @@ function buildWorld(scene: THREE.Scene) {
   ground.receiveShadow = true;
   scene.add(ground);
 
-  scene.add(buildRoads(), buildBuildings());
+  scene.add(buildRoads(), buildLaneMarkings(), buildBuildings());
 
   const matrix = new THREE.Matrix4();
   const postsPerSide = 21;
@@ -518,10 +600,11 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
   const { sun, parkedCars } = buildWorld(scene);
   const roadster = buildRoadster();
   scene.add(roadster);
+  const fleet = createTrafficFleet(scene);
   const vapor = createVapor(scene);
   let emitDebt = 0;
 
-  const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 900);
+  const camera = new THREE.PerspectiveCamera(65, 1, 0.4, 900);
   const lookTarget = new THREE.Vector3();
   let cameraReady = false;
   let cameraHeading = 0;
@@ -578,6 +661,11 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
     const { position, orientation, heading } = state;
     roadster.position.set(position.x, position.y + state.suspension, position.z);
     state.obstacles.forEach((obstacle, index) => parkedCars[index]?.position.set(obstacle.x, 0, obstacle.z));
+    fleet.ensure(state.traffic.length);
+    state.traffic.forEach((car, index) => {
+      fleet.cars[index].position.set(car.x, 0, car.z);
+      fleet.cars[index].rotation.y = car.heading;
+    });
     roadster.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
     roadster.updateMatrixWorld();
     sun.target.position.set(position.x, 0, position.z);

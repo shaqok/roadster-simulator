@@ -5,6 +5,7 @@ import { RotateCcwIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
+  MAGOK_NETWORK,
   MAP_ATTRIBUTION,
   createMagokBuildings,
   createSimulation,
@@ -81,7 +82,7 @@ export function RoadsterSimulator() {
     const observer = new ResizeObserver(() => scene.resize());
     observer.observe(canvas.parentElement ?? canvas);
 
-    let state: SimState = createSimulation({ buildings: createMagokBuildings() });
+    let state: SimState = createSimulation({ buildings: createMagokBuildings(), roads: MAGOK_NETWORK });
     let accumulator = 0;
     let lastTime = performance.now();
     let lastHudTime = 0;
