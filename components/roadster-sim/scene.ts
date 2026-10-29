@@ -19,7 +19,6 @@ export type RoadsterScene = {
   dispose: () => void;
 };
 
-const BODY_RED = 0xc8102e;
 const PARKED_COLORS = [0xe8e8ec, 0x1c1f26, 0x5c6bc0, 0xc9c9cf, 0x2f6f8f];
 
 function box(w: number, h: number, d: number, color: number, y: number, z = 0) {
@@ -33,24 +32,182 @@ function box(w: number, h: number, d: number, color: number, y: number, z = 0) {
   return mesh;
 }
 
+const PEARL_WHITE = 0xe9e9ec;
+const DARK_TRIM = 0x15181d;
+const BRONZE = 0xb89a82;
+
+/** Extrudes a side profile of [z, y] points across the car, narrowing toward the top. */
+function profileBody(
+  profile: ReadonlyArray<readonly [number, number]>,
+  width: number,
+  taper: number,
+  material: THREE.Material
+) {
+  const shape = new THREE.Shape(profile.map(([z, y]) => new THREE.Vector2(z, y)));
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: width, bevelEnabled: false });
+  geometry.translate(0, 0, -width / 2);
+  geometry.rotateY(-Math.PI / 2);
+
+  const position = geometry.getAttribute("position");
+  let low = Infinity;
+  let high = -Infinity;
+  for (let i = 0; i < position.count; i++) {
+    low = Math.min(low, position.getY(i));
+    high = Math.max(high, position.getY(i));
+  }
+  for (let i = 0; i < position.count; i++) {
+    const narrowing = 1 - (taper * (position.getY(i) - low)) / (high - low);
+    position.setX(i, position.getX(i) * narrowing);
+  }
+  geometry.computeVertexNormals();
+
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function glowStrip(width: number, height: number, color: number, y: number, z: number) {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(width, height, 0.03),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  mesh.position.set(0, y, z);
+  return mesh;
+}
+
+function buildWheel(side: 1 | -1) {
+  const wheel = new THREE.Group();
+  const tire = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.34, 0.34, 0.26, 28),
+    new THREE.MeshStandardMaterial({ color: 0x111215, roughness: 0.85 })
+  );
+  tire.rotation.z = Math.PI / 2;
+  tire.castShadow = true;
+  wheel.add(tire);
+
+  const face = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.27, 0.27, 0.02, 28),
+    new THREE.MeshStandardMaterial({ color: 0xe4e4e8, roughness: 0.4, metalness: 0.3 })
+  );
+  face.rotation.z = Math.PI / 2;
+  face.position.x = side * 0.131;
+  wheel.add(face);
+
+  // Six dark turbine spokes, drawn as three bars through the hub.
+  const spokeMaterial = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.5, metalness: 0.4 });
+  for (let i = 0; i < 3; i++) {
+    const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.5), spokeMaterial);
+    spoke.position.x = side * 0.14;
+    spoke.rotation.x = (i * Math.PI) / 3;
+    wheel.add(spoke);
+  }
+  return wheel;
+}
+
+/**
+ * The second-generation Roadster as shown in Tesla's own photos: a low pearl-white wedge with a
+ * single dark bronze glass canopy, a light bar across the nose, a tall rear wing, a full-width red
+ * tail bar and four round nozzles in the tail. Forward is +z, the origin sits between the wheels on
+ * the ground.
+ */
 function buildRoadster(): THREE.Group {
   const group = new THREE.Group();
-  group.add(box(1.9, 0.45, 4.3, BODY_RED, 0.58));
-  group.add(box(1.7, 0.3, 1.8, BODY_RED, 0.95, -0.2));
-  group.add(box(1.5, 0.28, 1.1, 0x10151c, 1.05, 0.1));
+  const paint = new THREE.MeshStandardMaterial({
+    color: PEARL_WHITE,
+    roughness: 0.32,
+    metalness: 0.35,
+    emissive: 0x2c2c30,
+  });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x3a2a22, roughness: 0.12, metalness: 0.7 });
 
-  const wheelGeometry = new THREE.CylinderGeometry(0.34, 0.34, 0.26, 20);
-  wheelGeometry.rotateZ(Math.PI / 2);
-  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.8 });
+  // Body: long low hood rising to the windshield base, shoulders sloping down to a short tail.
+  group.add(
+    profileBody(
+      [
+        [-2.15, 0.3],
+        [-2.15, 0.8],
+        [-1.2, 0.86],
+        [1.2, 0.74],
+        [2.15, 0.46],
+        [2.15, 0.3],
+      ],
+      1.9,
+      0.1,
+      paint
+    )
+  );
+  // Canopy: one tinted glass piece from the hood to the tail deck.
+  group.add(
+    profileBody(
+      [
+        [-1.9, 0.82],
+        [-1.25, 1.16],
+        [0.1, 1.16],
+        [1.4, 0.72],
+        [-1.9, 0.72],
+      ],
+      1.62,
+      0.3,
+      glass
+    )
+  );
+
+  // Dark lower skirt and front splitter.
+  group.add(box(1.88, 0.16, 4.2, DARK_TRIM, 0.24));
+  group.add(box(1.7, 0.04, 0.5, DARK_TRIM, 0.19, 2.15));
+
+  // Nose: dark fascia under a thin white light bar, triangular lamps at the corners.
+  group.add(box(1.5, 0.2, 0.04, DARK_TRIM, 0.4, 2.14));
+  group.add(glowStrip(1.7, 0.025, 0xffffff, 0.5, 2.16));
+  for (const side of [1, -1]) {
+    const lamp = glowStrip(0.22, 0.05, 0xf4f8ff, 0.62, 2.0);
+    lamp.position.x = side * 0.72;
+    lamp.rotation.z = side * 0.35;
+    group.add(lamp);
+  }
+
+  // Tail: red bar, plate, nozzle recess with four round nozzles, diffuser.
+  group.add(glowStrip(1.75, 0.035, 0xff1a1a, 0.84, -2.16));
+  group.add(box(0.5, 0.12, 0.02, 0xf0f0f2, 0.64, -2.17));
+  group.add(box(1.1, 0.3, 0.1, DARK_TRIM, 0.46, -2.12));
+  const nozzleMaterial = new THREE.MeshStandardMaterial({ color: 0x6b5a45, roughness: 0.4, metalness: 0.8 });
+  for (const x of [-0.45, -0.15, 0.15, 0.45]) {
+    const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 0.14, 14), nozzleMaterial);
+    nozzle.rotation.x = Math.PI / 2;
+    nozzle.position.set(x, 0.5, -2.2);
+    group.add(nozzle);
+  }
+  group.add(box(1.5, 0.05, 0.4, DARK_TRIM, 0.22, -2.0));
+
+  // Rear wing on two struts.
+  const wing = box(1.75, 0.04, 0.55, BRONZE, 1.27, -2.0);
+  wing.rotation.x = -0.12;
+  group.add(wing);
+  for (const x of [-0.55, 0.55]) group.add(box(0.04, 0.35, 0.08, DARK_TRIM, 1.05, -1.95).translateX(x));
+
+  // Side thruster nozzles under the body, ahead of and behind each door.
+  const sideNozzle = new THREE.MeshStandardMaterial({ color: 0x4a4d54, roughness: 0.4, metalness: 0.8 });
   for (const [x, z] of [
-    [0.95, 1.35],
-    [-0.95, 1.35],
-    [0.95, -1.35],
-    [-0.95, -1.35],
+    [0.82, 1.0],
+    [-0.82, 1.0],
+    [0.82, -1.7],
+    [-0.82, -1.7],
   ]) {
-    const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+    const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.12, 12), sideNozzle);
+    nozzle.position.set(x, 0.17, z);
+    group.add(nozzle);
+  }
+
+  // Wheels stand slightly proud of the body, as in the photos.
+  for (const [x, z, side] of [
+    [0.93, 1.35, 1],
+    [-0.93, 1.35, -1],
+    [0.93, -1.35, 1],
+    [-0.93, -1.35, -1],
+  ] as const) {
+    const wheel = buildWheel(side);
     wheel.position.set(x, 0.34, z);
-    wheel.castShadow = true;
     group.add(wheel);
   }
 
@@ -135,6 +292,9 @@ function buildRoads() {
   mesh.receiveShadow = true;
   return mesh;
 }
+
+const ROOF_COLOR = new THREE.Color(0xd9dde3);
+const WALL_COLOR = new THREE.Color(0xaab2bf);
 
 /** Every building footprint extruded to its height, merged so they cost one draw call. */
 function buildBuildings() {
@@ -245,14 +405,14 @@ type Jet = { nozzles: Nozzle[]; speed: number; life: number; size: number; perSe
 // spreading and fading, rather than a solid flame.
 const MAIN_JETS: Jet[] = [
   {
-    // Four nozzles in the belly fire straight down, as in the footage: fat columns of vapor that
+    // Four nozzles under the body fire straight down, as in the footage: fat columns of vapor that
     // spread into a cloud when they reach the ground.
     nozzles: [
-      [-0.6, 1.0],
-      [0.6, 1.0],
-      [-0.6, -1.0],
-      [0.6, -1.0],
-    ].map(([x, z]) => ({ at: [x, 0.1, z], aim: [0, -1, 0] })),
+      [-0.82, 1.0],
+      [0.82, 1.0],
+      [-0.82, -1.7],
+      [0.82, -1.7],
+    ].map(([x, z]) => ({ at: [x, 0.12, z], aim: [0, -1, 0] })),
     speed: 13,
     life: 1.5,
     size: 0.5,
