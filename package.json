@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "map:magok": "node scripts/build-magok-map.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

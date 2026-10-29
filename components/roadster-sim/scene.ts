@@ -1,7 +1,9 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 import type { AttitudeJets } from "./controls";
 import {
+  MAGOK_MAP,
   MAP_HALF_SIZE,
   OBSTACLES,
   RAMPS,
@@ -74,6 +76,86 @@ function buildRamp(ramp: Ramp) {
   return mesh;
 }
 
+const ROAD_COLORS: Record<string, number> = {
+  motorway: 0x24262b,
+  trunk: 0x24262b,
+  primary: 0x2a2c32,
+  secondary: 0x2e3036,
+  tertiary: 0x34363c,
+  residential: 0x3a3c42,
+  unclassified: 0x3a3c42,
+  living_street: 0x40424a,
+  service: 0x44464e,
+  busway: 0x5a3030,
+};
+const ROAD_RANK = ["service", "living_street", "residential", "unclassified", "tertiary", "secondary", "primary", "trunk", "motorway"];
+
+/** Every road as flat quads laid along its centerline, wider roads slightly higher to avoid flicker. */
+function buildRoads() {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const color = new THREE.Color();
+
+  for (const road of MAGOK_MAP.roads) {
+    const rank = Math.max(0, ROAD_RANK.indexOf(road.c.replace("_link", "")));
+    const y = 0.01 + rank * 0.002;
+    color.set(ROAD_COLORS[road.c.replace("_link", "")] ?? 0x3a3c42);
+    const half = road.w / 2;
+    for (let i = 0; i < road.p.length - 1; i++) {
+      const [x0, z0] = road.p[i];
+      const [x1, z1] = road.p[i + 1];
+      const length = Math.hypot(x1 - x0, z1 - z0);
+      if (length < 0.01) continue;
+      const nx = ((z1 - z0) / length) * half;
+      const nz = (-(x1 - x0) / length) * half;
+      const corners = [
+        [x0 + nx, z0 + nz],
+        [x0 - nx, z0 - nz],
+        [x1 - nx, z1 - nz],
+        [x1 + nx, z1 + nz],
+      ];
+      for (const index of [0, 1, 2, 0, 2, 3]) {
+        positions.push(corners[index][0], y, corners[index][1]);
+        colors.push(color.r, color.g, color.b);
+      }
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.computeVertexNormals();
+  // Triangles above were wound arbitrarily per segment, so draw both faces and light them upward.
+  const normals = geometry.getAttribute("normal");
+  for (let i = 0; i < normals.count; i++) normals.setXYZ(i, 0, 1, 0);
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, side: THREE.DoubleSide })
+  );
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+/** Every building footprint extruded to its height, merged so they cost a few draw calls. */
+function buildBuildings() {
+  const geometries = MAGOK_MAP.buildings.map((building) => {
+    const shape = new THREE.Shape(building.p.map(([x, z]) => new THREE.Vector2(x, -z)));
+    const geometry = new THREE.ExtrudeGeometry(shape, { depth: building.h, bevelEnabled: false });
+    geometry.rotateX(-Math.PI / 2);
+    return geometry;
+  });
+  const merged = mergeGeometries(geometries, true);
+  geometries.forEach((geometry) => geometry.dispose());
+
+  const mesh = new THREE.Mesh(merged, [
+    new THREE.MeshStandardMaterial({ color: 0xd9dde3, roughness: 0.8 }),
+    new THREE.MeshStandardMaterial({ color: 0xaab2bf, roughness: 0.75 }),
+  ]);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
 /** Sun position relative to the car; the shadow camera follows the car so shadows stay sharp. */
 const SUN_OFFSET = new THREE.Vector3(18, 120, -10);
 
@@ -106,28 +188,9 @@ function buildWorld(scene: THREE.Scene) {
   ground.receiveShadow = true;
   scene.add(ground);
 
-  const road = new THREE.Mesh(
-    new THREE.PlaneGeometry(14, size),
-    new THREE.MeshStandardMaterial({ color: 0x2e3036, roughness: 0.9 })
-  );
-  road.rotation.x = -Math.PI / 2;
-  road.position.y = 0;
-  road.receiveShadow = true;
-  scene.add(road);
+  scene.add(buildRoads(), buildBuildings());
 
-  const dashCount = Math.floor(size / 8);
-  const dashes = new THREE.InstancedMesh(
-    new THREE.BoxGeometry(0.3, 0.02, 3.5),
-    new THREE.MeshBasicMaterial({ color: 0xf2f2f2 }),
-    dashCount
-  );
   const matrix = new THREE.Matrix4();
-  for (let i = 0; i < dashCount; i++) {
-    matrix.setPosition(0, 0.02, -MAP_HALF_SIZE + 4 + i * 8);
-    dashes.setMatrixAt(i, matrix);
-  }
-  scene.add(dashes);
-
   const postsPerSide = 21;
   const posts = new THREE.InstancedMesh(
     new THREE.CylinderGeometry(0.3, 0.3, 3, 8),

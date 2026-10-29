@@ -2,9 +2,10 @@ import {
   groundHeightAt,
   groundNormalAt,
   rampHeightAt,
-  type Obstacle,
   type ObstacleState,
+  type Solids,
 } from "./map";
+import { buildingContact } from "./world";
 import {
   add,
   cross,
@@ -54,6 +55,7 @@ const RESUME_JOLT_RATE = -1.2;
 const RESTITUTION = 0.25;
 const BODY_RESTITUTION = 0.15;
 const BOUNCE_THRESHOLD = 1.5;
+const MAX_ENTRY_DEPTH = 0.8;
 const FRICTION = 0.6;
 const ANGULAR_DAMPING = 0.15;
 const SOLVER_ITERATIONS = 10;
@@ -80,12 +82,12 @@ function worldCorner(position: Vec3, orientation: Quat, corner: Vec3): Vec3 {
 export function lowestClearance(
   position: Vec3,
   orientation: Quat,
-  obstacles: readonly Obstacle[]
+  solids: Solids
 ): number {
   let lowest = Infinity;
   for (const corner of CORNERS) {
     const p = worldCorner(position, orientation, corner);
-    lowest = Math.min(lowest, p.y - groundHeightAt(p.x, p.z, obstacles));
+    lowest = Math.min(lowest, p.y - groundHeightAt(p.x, p.z, solids));
   }
   return lowest;
 }
@@ -105,11 +107,8 @@ const WHEELS_DOWN_CONTACTS = 3;
  * faces the corner is moving into are candidates, because the shallowest face is often the wrong
  * one: the roadster is almost as wide as a parked car, so a head-on hit is barely inside its sides.
  */
-function obstacleContact(
-  p: Vec3,
-  velocity: Vec3,
-  obstacles: readonly Obstacle[]
-): Contact | undefined {
+function obstacleContact(p: Vec3, velocity: Vec3, solids: Solids): Contact | undefined {
+  const { obstacles } = solids;
   for (let index = 0; index < obstacles.length; index++) {
     const o = obstacles[index];
     const dx = o.sizeX / 2 - Math.abs(p.x - o.x);
@@ -122,10 +121,23 @@ function obstacleContact(
       { normal: vec(Math.sign(p.x - o.x), 0, 0), penetration: dx, restitution: BODY_RESTITUTION },
       { normal: vec(0, 0, Math.sign(p.z - o.z)), penetration: dz, restitution: BODY_RESTITUTION },
     ];
-    const entered = faces.filter((face) => dot(face.normal, velocity) < 0);
+    // A corner cannot have gone deeper than a step of travel, so a far face it is moving "into"
+    // (the back of the car after a bounce) is not the one it crossed.
+    const entered = faces.filter(
+      (face) => dot(face.normal, velocity) < 0 && face.penetration <= MAX_ENTRY_DEPTH
+    );
     const candidates = entered.length > 0 ? entered : faces;
     const best = candidates.reduce((a, face) => (face.penetration < a.penetration ? face : a));
     return { ...best, obstacle: index };
+  }
+
+  // Buildings never move, so they carry no obstacle index and take the whole impact.
+  const building = buildingContact(solids.buildings, p);
+  if (building) {
+    return {
+      ...building,
+      restitution: building.normal.y > 0 ? RESTITUTION : BODY_RESTITUTION,
+    };
   }
   return undefined;
 }
@@ -135,10 +147,10 @@ export function hitsObstacleSide(
   position: Vec3,
   orientation: Quat,
   velocity: Vec3,
-  obstacles: readonly Obstacle[]
+  solids: Solids
 ): boolean {
   return CORNERS.some((corner) => {
-    const contact = obstacleContact(worldCorner(position, orientation, corner), velocity, obstacles);
+    const contact = obstacleContact(worldCorner(position, orientation, corner), velocity, solids);
     return contact !== undefined && contact.normal.y === 0;
   });
 }
@@ -150,6 +162,7 @@ export function hitsObstacleSide(
 export function stepTumbling(state: SimState, dt: number): SimState {
   let { position, velocity, orientation, angularVelocity } = state;
   const obstacles: ObstacleState[] = state.obstacles.map((o) => ({ ...o }));
+  const solids: Solids = { obstacles, buildings: state.buildings };
 
   velocity = add(velocity, vec(0, -GRAVITY * dt, 0));
   angularVelocity = scale(angularVelocity, Math.exp(-ANGULAR_DAMPING * dt));
@@ -170,12 +183,12 @@ export function stepTumbling(state: SimState, dt: number): SimState {
     if (groundPenetration >= -CONTACT_MARGIN) {
       touching.push({
         corner,
-        normal: groundNormalAt(p.x, p.z, obstacles),
+        normal: groundNormalAt(p.x, p.z, solids),
         penetration: groundPenetration,
         restitution: RESTITUTION,
       });
     }
-    const body = obstacleContact(p, velocity, obstacles);
+    const body = obstacleContact(p, velocity, solids);
     if (body) touching.push({ corner, ...body });
   }
   const pushedOut = touching.filter((contact) => contact.penetration > 0);
@@ -272,7 +285,7 @@ export function stepTumbling(state: SimState, dt: number): SimState {
   ).length;
   const hitSomethingSideways = touching.some((contact) => contact.normal.y < 0.5);
   const up = rotate(orientation, vec(0, 1, 0));
-  const surface = groundNormalAt(position.x, position.z, obstacles);
+  const surface = groundNormalAt(position.x, position.z, solids);
   if (
     wheelsOnSurface >= WHEELS_DOWN_CONTACTS &&
     !hitSomethingSideways &&
@@ -283,8 +296,12 @@ export function stepTumbling(state: SimState, dt: number): SimState {
   return restTime >= REST_TIME ? settle(next) : next;
 }
 
+function solidsOf(state: SimState): Solids {
+  return { obstacles: state.obstacles, buildings: state.buildings };
+}
+
 function resumeDriving(state: SimState): SimState {
-  const normal = groundNormalAt(state.position.x, state.position.z, state.obstacles);
+  const normal = groundNormalAt(state.position.x, state.position.z, solidsOf(state));
   const forward = rotate(state.orientation, vec(0, 0, 1));
   const heading = Math.hypot(forward.x, forward.z) > 0.5 ? Math.atan2(forward.x, forward.z) : state.heading;
   return {
@@ -293,7 +310,7 @@ function resumeDriving(state: SimState): SimState {
     heading,
     position: vec(
       state.position.x,
-      groundHeightAt(state.position.x, state.position.z, state.obstacles),
+      groundHeightAt(state.position.x, state.position.z, solidsOf(state)),
       state.position.z
     ),
     velocity: sub(state.velocity, scale(normal, dot(state.velocity, normal))),
@@ -304,8 +321,8 @@ function resumeDriving(state: SimState): SimState {
 }
 
 function settle(state: SimState): SimState {
-  const groundY = groundHeightAt(state.position.x, state.position.z, state.obstacles);
-  const normal = groundNormalAt(state.position.x, state.position.z, state.obstacles);
+  const groundY = groundHeightAt(state.position.x, state.position.z, solidsOf(state));
+  const normal = groundNormalAt(state.position.x, state.position.z, solidsOf(state));
   const up = rotate(state.orientation, vec(0, 1, 0));
   const still = { velocity: vec(0, 0, 0), angularVelocity: vec(0, 0, 0), restTime: 0 };
 

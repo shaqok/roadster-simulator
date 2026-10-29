@@ -1,7 +1,8 @@
 import { normalize, vec, type Vec3 } from "./vec";
+import { buildingHeightAt, type BuildingIndex } from "./world";
 
 /** Half-size of the playable square, in meters. Beyond it the car is lost. */
-export const MAP_HALF_SIZE = 400;
+export const MAP_HALF_SIZE = 700;
 
 /** Ramp rising along +z from `z0`, `length` long, `height` tall at its far edge, then a sheer drop. */
 export type Ramp = { x: number; z0: number; length: number; width: number; height: number };
@@ -11,6 +12,9 @@ export type Obstacle = { x: number; z: number; sizeX: number; sizeZ: number; hei
 
 /** A parked vehicle that can be shoved: it slides in a straight line and is slowed by friction. */
 export type ObstacleState = Obstacle & { vx: number; vz: number };
+
+/** Everything solid that the ground height and collisions depend on. */
+export type Solids = { obstacles: readonly Obstacle[]; buildings: BuildingIndex };
 
 export function createObstacles(): ObstacleState[] {
   return OBSTACLES.map((o) => ({ ...o, vx: 0, vz: 0 }));
@@ -49,12 +53,18 @@ export function obstacleAt(
   );
 }
 
-export function groundHeightAt(x: number, z: number, obstacles: readonly Obstacle[]): number {
-  return Math.max(rampHeightAt(x, z), obstacleAt(x, z, obstacles)?.height ?? 0);
+export function groundHeightAt(x: number, z: number, solids: Solids): number {
+  return Math.max(
+    rampHeightAt(x, z),
+    obstacleAt(x, z, solids.obstacles)?.height ?? 0,
+    buildingHeightAt(solids.buildings, x, z)
+  );
 }
 
-export function groundNormalAt(x: number, z: number, obstacles: readonly Obstacle[]): Vec3 {
-  if (obstacleAt(x, z, obstacles)) return vec(0, 1, 0);
+export function groundNormalAt(x: number, z: number, solids: Solids): Vec3 {
+  if (obstacleAt(x, z, solids.obstacles) || buildingHeightAt(solids.buildings, x, z) > 0) {
+    return vec(0, 1, 0);
+  }
   for (const ramp of RAMPS) {
     if (Math.abs(x - ramp.x) <= ramp.width / 2 && z >= ramp.z0 && z <= ramp.z0 + ramp.length) {
       return normalize(vec(0, 1, -ramp.height / ramp.length));

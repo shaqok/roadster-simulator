@@ -16,4 +16,12 @@ export {
   type ObstacleState,
   type Ramp,
 } from "./map";
+export {
+  MAGOK_MAP,
+  MAP_ATTRIBUTION,
+  createMagokBuildings,
+  type MapBuilding,
+  type MapRoad,
+} from "./magok";
+export { createBuildingIndex, type Building, type BuildingIndex } from "./world";
 export type { Quat, Vec3 } from "./vec";

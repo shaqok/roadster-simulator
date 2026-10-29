@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAP_HALF_SIZE,
+  createBuildingIndex,
   bodyAxes,
   createSimulation,
   IDLE_INPUT,
@@ -436,6 +437,95 @@ describe("거친 착지", () => {
 
     expect(["driving", "overturned"]).toContain(end.mode);
     expect(lowest).toBeGreaterThan(-0.2);
+  });
+});
+
+describe("건물", () => {
+  const square = (cx: number, cz: number, size: number, rotation = 0): Array<[number, number]> =>
+    ([[-1, -1], [1, -1], [1, 1], [-1, 1]] as const).map(([sx, sz]) => {
+      const x = (sx * size) / 2;
+      const z = (sz * size) / 2;
+      return [
+        cx + x * Math.cos(rotation) - z * Math.sin(rotation),
+        cz + x * Math.sin(rotation) + z * Math.cos(rotation),
+      ];
+    });
+
+  const town = (rotation = 0) =>
+    createBuildingIndex([{ height: 15, points: square(60, -40, 20, rotation) }]);
+
+  const driveInto = (buildings: ReturnType<typeof town>, seconds: number) => {
+    const start: SimState = {
+      ...createSimulation({ buildings }),
+      position: { x: 60, y: 0, z: -100 },
+      velocity: { x: 0, y: 0, z: 25 },
+    };
+    const modes = new Set<string>();
+    let furthest = -Infinity;
+    const end = run(start, seconds, (s) => {
+      modes.add(s.mode);
+      furthest = Math.max(furthest, s.position.z);
+      return {};
+    });
+    return { end, modes, furthest };
+  };
+
+  it("건물 옆면에 부딪히면 통과하지 못하고 튕겨 나온다", () => {
+    const { end, modes, furthest } = driveInto(town(), 6);
+
+    expect(modes.has("tumbling")).toBe(true);
+    expect(furthest).toBeLessThan(-50);
+    expect(end.position.z).toBeLessThan(-50);
+    expect(["driving", "overturned"]).toContain(end.mode);
+  });
+
+  it("비스듬히 놓인 건물의 모서리와 면에도 통과하지 않는다", () => {
+    const { furthest, modes } = driveInto(town(Math.PI / 4), 6);
+
+    expect(modes.has("tumbling")).toBe(true);
+    expect(furthest).toBeLessThan(-40 + 10 * Math.SQRT2);
+  });
+
+  it("건물 높이 위로 떠올라 옥상에 반듯하게 내려앉으면 옥상에서 달릴 수 있고, 가장자리를 넘으면 떨어진다", () => {
+    const above: SimState = {
+      ...createSimulation({ buildings: town() }),
+      mode: "airborne",
+      position: { x: 60, y: 19, z: -40 },
+    };
+    const onRoof = run(above, 2, {});
+    expect(onRoof.mode).toBe("driving");
+    expect(onRoof.position.y).toBeCloseTo(15, 1);
+
+    let wasAirborne = false;
+    const driven = run(onRoof, 8, (s) => {
+      if (s.mode === "airborne") wasAirborne = true;
+      return { throttle: 1 };
+    });
+    expect(wasAirborne).toBe(true);
+    expect(driven.position.y).toBeLessThan(1);
+  });
+
+  it("건물 높이보다 낮게 날아 부딪혀도 안쪽으로 파고들지 않는다", () => {
+    const low: SimState = {
+      ...createSimulation({ buildings: town() }),
+      mode: "airborne",
+      position: { x: 60, y: 6, z: -70 },
+      velocity: { x: 0, y: 0, z: 20 },
+    };
+    let furthest = -Infinity;
+    run(low, 4, (s) => {
+      furthest = Math.max(furthest, s.position.z);
+      return {};
+    });
+
+    expect(furthest).toBeLessThan(-50);
+  });
+
+  it("건물이 없는 곳에서는 이전과 똑같이 달린다", () => {
+    const { end } = driveInto(createBuildingIndex([]), 3);
+
+    expect(end.position.z).toBeGreaterThan(-100 + 25 * 2);
+    expect(end.mode).toBe("driving");
   });
 });
 

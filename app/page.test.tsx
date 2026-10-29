@@ -14,4 +14,8 @@ test("홈 화면은 접속 즉시 시뮬레이터의 상태 표시와 조작 안
   );
   expect(screen.getByRole("button", { name: "재시작" })).toBeInTheDocument();
   expect(screen.getByText("Space")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "© OpenStreetMap contributors" })).toHaveAttribute(
+    "href",
+    "https://www.openstreetmap.org/copyright"
+  );
 });

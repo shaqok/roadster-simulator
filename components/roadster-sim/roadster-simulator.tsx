@@ -5,6 +5,8 @@ import { RotateCcwIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
+  MAP_ATTRIBUTION,
+  createMagokBuildings,
   createSimulation,
   stepSimulation,
   type SimMode,
@@ -79,7 +81,7 @@ export function RoadsterSimulator() {
     const observer = new ResizeObserver(() => scene.resize());
     observer.observe(canvas.parentElement ?? canvas);
 
-    let state: SimState = createSimulation();
+    let state: SimState = createSimulation({ buildings: createMagokBuildings() });
     let accumulator = 0;
     let lastTime = performance.now();
     let lastHudTime = 0;
@@ -218,6 +220,15 @@ export function RoadsterSimulator() {
           </div>
         ))}
       </dl>
+
+      <a
+        href="https://www.openstreetmap.org/copyright"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="absolute right-3 bottom-2 rounded bg-background/80 px-2 py-1 text-xs text-muted-foreground backdrop-blur hover:text-foreground"
+      >
+        {MAP_ATTRIBUTION}
+      </a>
     </div>
   );
 }

@@ -5,7 +5,9 @@ import {
   groundHeightAt,
   groundNormalAt,
   type ObstacleState,
+  type Solids,
 } from "./map";
+import { NO_BUILDINGS, type BuildingIndex } from "./world";
 import { CENTER_OF_MASS, hitsObstacleSide, lowestClearance, stepTumbling } from "./tumble";
 import {
   IDENTITY,
@@ -46,6 +48,8 @@ export type SimState = {
   thrustAir: number;
   /** Parked cars, which slide when shoved. */
   obstacles: ObstacleState[];
+  /** Static buildings the car collides with and can land on. Shared, never modified. */
+  buildings: BuildingIndex;
   /** Vertical body offset from the wheels in meters (negative = compressed) and its rate. */
   suspension: number;
   suspensionRate: number;
@@ -99,7 +103,7 @@ const MAX_SUSPENSION_TRAVEL = 0.3;
 const JOLT_RATE_PER_IMPACT_SPEED = 0.12;
 const MAX_JOLT_RATE = 3;
 
-export function createSimulation(): SimState {
+export function createSimulation(options: { buildings?: BuildingIndex } = {}): SimState {
   return {
     mode: "driving",
     position: vec(0, 0, 0),
@@ -110,6 +114,7 @@ export function createSimulation(): SimState {
     heading: 0,
     thrustAir: 1,
     obstacles: createObstacles(),
+    buildings: options.buildings ?? NO_BUILDINGS,
     suspension: 0,
     suspensionRate: 0,
   };
@@ -122,7 +127,7 @@ export function bodyAxes(state: SimState): { forward: Vec3; up: Vec3; right: Vec
 }
 
 export function stepSimulation(state: SimState, input: ControlInput, dt: number): SimState {
-  if (input.reset) return createSimulation();
+  if (input.reset) return createSimulation({ buildings: state.buildings });
 
   const next = stepCar(state, input, dt);
   return { ...next, obstacles: advanceObstacles(next.obstacles, dt) };
@@ -142,6 +147,10 @@ function stepCar(state: SimState, input: ControlInput, dt: number): SimState {
         ? stepAirborne({ ...state, mode: "airborne" }, input, dt)
         : stepDriving(state, input, dt);
   }
+}
+
+function solidsOf(state: SimState): Solids {
+  return { obstacles: state.obstacles, buildings: state.buildings };
 }
 
 function headingVector(heading: number): Vec3 {
@@ -165,7 +174,7 @@ function isOutOfBounds(position: Vec3) {
 }
 
 function stepDriving(state: SimState, input: ControlInput, dt: number): SimState {
-  const normal = groundNormalAt(state.position.x, state.position.z, state.obstacles);
+  const normal = groundNormalAt(state.position.x, state.position.z, solidsOf(state));
   const tangent = slopeTangent(state.heading, normal);
   let speed = dot(state.velocity, tangent);
 
@@ -188,10 +197,10 @@ function stepDriving(state: SimState, input: ControlInput, dt: number): SimState
 
   const velocity = scale(slopeTangent(heading, normal), speed);
   const moved = add(state.position, scale(velocity, dt));
-  const groundY = groundHeightAt(moved.x, moved.z, state.obstacles);
+  const groundY = groundHeightAt(moved.x, moved.z, solidsOf(state));
   const thrustAir = Math.min(1, state.thrustAir + THRUST_AIR_REGEN_PER_SECOND * dt);
 
-  if (hitsObstacleSide(moved, state.orientation, velocity, state.obstacles)) {
+  if (hitsObstacleSide(moved, state.orientation, velocity, solidsOf(state))) {
     return { ...state, mode: "tumbling", heading, thrustAir, velocity, restTime: 0 };
   }
   if (isOutOfBounds(moved)) {
@@ -204,7 +213,7 @@ function stepDriving(state: SimState, input: ControlInput, dt: number): SimState
   const position = vec(moved.x, groundY, moved.z);
   const target = groundOrientation(
     heading,
-    groundNormalAt(position.x, position.z, state.obstacles)
+    groundNormalAt(position.x, position.z, solidsOf(state))
   );
   const orientation = quatNlerp(
     state.orientation,
@@ -267,7 +276,7 @@ function stepAirborne(state: SimState, input: ControlInput, dt: number): SimStat
     suspensionRate: 0,
   };
 
-  if (hitsObstacleSide(moved, orientation, velocity, state.obstacles)) {
+  if (hitsObstacleSide(moved, orientation, velocity, solidsOf(state))) {
     return {
       ...next,
       mode: "tumbling",
@@ -277,17 +286,17 @@ function stepAirborne(state: SimState, input: ControlInput, dt: number): SimStat
   }
   if (isOutOfBounds(moved)) return { ...next, mode: "lost" };
 
-  if (velocity.y <= 0 && lowestClearance(moved, orientation, state.obstacles) <= 0) return touchDown(next);
+  if (velocity.y <= 0 && lowestClearance(moved, orientation, solidsOf(state)) <= 0) return touchDown(next);
   return next;
 }
 
 /** A level touchdown keeps driving however fast it was; a tilted one becomes a bouncing, rolling impact. */
 function touchDown(state: SimState): SimState {
-  const normal = groundNormalAt(state.position.x, state.position.z, state.obstacles);
+  const normal = groundNormalAt(state.position.x, state.position.z, solidsOf(state));
   const { up } = bodyAxes(state);
 
   if (dot(up, normal) >= LEVEL_LANDING_TILT_COS) {
-    const groundY = groundHeightAt(state.position.x, state.position.z, state.obstacles);
+    const groundY = groundHeightAt(state.position.x, state.position.z, solidsOf(state));
     const impactSpeed = Math.max(0, -state.velocity.y);
     return {
       ...state,
