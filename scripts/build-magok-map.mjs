@@ -11,6 +11,9 @@ import path from "node:path";
 
 const CENTER = { lat: 37.5625, lon: 126.83 };
 const HALF_SIZE = 700;
+// The map is rotated to put the start road along +z, so the square it keeps reaches up to
+// sqrt(2) times farther than HALF_SIZE from the center in the original north-up frame.
+const FETCH_HALF_SIZE = Math.ceil(HALF_SIZE * Math.SQRT2) + 20;
 const OUTPUT = "lib/roadster-sim/data/magok-map.json";
 const OVERPASS = "https://overpass-api.de/api/interpreter";
 const USER_AGENT = "roadster-simulator-map-fetch/0.1";
@@ -50,6 +53,22 @@ const DEFAULT_ROAD_WIDTH = {
 };
 const LANE_WIDTH = 3.3;
 const DEFAULT_BUILDING_HEIGHT = 12;
+// Used only when the map gives neither a height nor a level count.
+const DEFAULT_HEIGHT_BY_TYPE = {
+  apartments: 45,
+  office: 40,
+  commercial: 24,
+  hotel: 40,
+  hospital: 30,
+  university: 24,
+  school: 16,
+  industrial: 12,
+  house: 7,
+  detached: 7,
+  residential: 12,
+  construction: 8,
+  greenhouse: 4,
+};
 const LEVEL_HEIGHT = 3.2;
 
 // The straight start road must hold the ramp and parked cars, which reach about 120 m ahead.
@@ -71,11 +90,12 @@ function roadWidth(tags) {
 }
 
 function buildingHeight(tags) {
+  const fallback = DEFAULT_HEIGHT_BY_TYPE[tags.building] ?? DEFAULT_BUILDING_HEIGHT;
   const height = Number.parseFloat(tags.height);
   if (Number.isFinite(height) && height > 0) return Math.min(250, Math.max(3, height));
   const levels = Number.parseFloat(tags["building:levels"]);
   if (Number.isFinite(levels) && levels > 0) return Math.min(250, Math.max(3, levels * LEVEL_HEIGHT));
-  return DEFAULT_BUILDING_HEIGHT;
+  return fallback;
 }
 
 function polygonArea(points) {
@@ -102,8 +122,8 @@ async function loadRaw() {
   const fromIndex = process.argv.indexOf("--from");
   if (fromIndex !== -1) return JSON.parse(await readFile(process.argv[fromIndex + 1], "utf8"));
 
-  const dLat = HALF_SIZE / METERS_PER_LAT;
-  const dLon = HALF_SIZE / METERS_PER_LON;
+  const dLat = FETCH_HALF_SIZE / METERS_PER_LAT;
+  const dLon = FETCH_HALF_SIZE / METERS_PER_LON;
   const bbox = [CENTER.lat - dLat, CENTER.lon - dLon, CENTER.lat + dLat, CENTER.lon + dLon].join(",");
   const query = `[out:json][timeout:60];(way["highway"](${bbox});way["building"](${bbox});relation["building"](${bbox}););out geom tags;`;
   const response = await fetch(OVERPASS, {
@@ -163,14 +183,34 @@ function corridorIsClear({ origin, direction }, buildings) {
   return true;
 }
 
+// Prefer a start with plenty of buildings in the view ahead, so the first screen is a city and
+// not an empty lot. The view is the road corridor and the blocks beside it.
+const VIEW_AHEAD = { from: -20, to: 320, halfWidth: 150 };
+
 function pickStart(roads, buildings) {
+  const centers = buildings.map(({ points }) => [
+    points.reduce((sum, [x]) => sum + x, 0) / points.length,
+    points.reduce((sum, [, z]) => sum + z, 0) / points.length,
+  ]);
+  const inView = ({ origin, direction }) => {
+    const side = [-direction[1], direction[0]];
+    return centers.filter(([x, z]) => {
+      const dx = x - origin[0];
+      const dz = z - origin[1];
+      const along = dx * direction[0] + dz * direction[1];
+      const across = dx * side[0] + dz * side[1];
+      return along > VIEW_AHEAD.from && along < VIEW_AHEAD.to && Math.abs(across) < VIEW_AHEAD.halfWidth;
+    }).length;
+  };
+
   let best;
   for (const road of roads) {
     if (road.width < START_MIN_ROAD_WIDTH) continue;
     for (const candidate of straightStarts(road)) {
-      const distance = Math.hypot(...candidate.origin);
-      if (best && distance >= best.distance) continue;
-      if (corridorIsClear(candidate, buildings)) best = { ...candidate, distance, road };
+      const visible = inView(candidate);
+      const score = visible - Math.hypot(...candidate.origin) / 100;
+      if (best && score <= best.score) continue;
+      if (corridorIsClear(candidate, buildings)) best = { ...candidate, score, visible, road };
     }
   }
   if (!best) throw new Error("No straight, building-free road found for the start");
@@ -250,6 +290,6 @@ const map = {
 await mkdir(path.dirname(OUTPUT), { recursive: true });
 await writeFile(OUTPUT, JSON.stringify(map));
 console.log(
-  `start on ${start.road.name ?? start.road.cls} (${start.road.width} m wide), ` +
+  `start on ${start.road.name ?? start.road.cls} (${start.road.width} m wide, ${start.visible} buildings in view ahead), ` +
     `${map.roads.length} roads, ${map.buildings.length} buildings -> ${OUTPUT}`
 );

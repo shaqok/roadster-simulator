@@ -136,7 +136,7 @@ function buildRoads() {
   return mesh;
 }
 
-/** Every building footprint extruded to its height, merged so they cost a few draw calls. */
+/** Every building footprint extruded to its height, merged so they cost one draw call. */
 function buildBuildings() {
   const geometries = MAGOK_MAP.buildings.map((building) => {
     const shape = new THREE.Shape(building.p.map(([x, z]) => new THREE.Vector2(x, -z)));
@@ -144,13 +144,23 @@ function buildBuildings() {
     geometry.rotateX(-Math.PI / 2);
     return geometry;
   });
-  const merged = mergeGeometries(geometries, true);
+  // Merged without groups: a group per building would index a material per building.
+  const merged = mergeGeometries(geometries, false);
   geometries.forEach((geometry) => geometry.dispose());
 
-  const mesh = new THREE.Mesh(merged, [
-    new THREE.MeshStandardMaterial({ color: 0xd9dde3, roughness: 0.8 }),
-    new THREE.MeshStandardMaterial({ color: 0xaab2bf, roughness: 0.75 }),
-  ]);
+  // Roofs face up and walls face sideways, so shade them by normal in a single material.
+  const normals = merged.getAttribute("normal");
+  const colors: number[] = [];
+  for (let i = 0; i < normals.count; i++) {
+    const color = normals.getY(i) > 0.5 ? ROOF_COLOR : WALL_COLOR;
+    colors.push(color.r, color.g, color.b);
+  }
+  merged.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+
+  const mesh = new THREE.Mesh(
+    merged,
+    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 })
+  );
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;
