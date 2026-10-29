@@ -151,6 +151,7 @@ function buildWorld(scene: THREE.Scene) {
 
   for (const ramp of RAMPS) scene.add(buildRamp(ramp));
 
+  const parkedCars: THREE.Group[] = [];
   OBSTACLES.forEach((obstacle, i) => {
     const color = PARKED_COLORS[i % PARKED_COLORS.length];
     const car = new THREE.Group();
@@ -158,9 +159,10 @@ function buildWorld(scene: THREE.Scene) {
     car.add(box(obstacle.sizeX * 0.85, 0.5, obstacle.sizeZ * 0.5, 0x10151c, obstacle.height - 0.25));
     car.position.set(obstacle.x, 0, obstacle.z);
     scene.add(car);
+    parkedCars.push(car);
   });
 
-  return { sun };
+  return { sun, parkedCars };
 }
 
 type Nozzle = { at: [number, number, number]; aim: [number, number, number] };
@@ -280,7 +282,7 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const scene = new THREE.Scene();
-  const { sun } = buildWorld(scene);
+  const { sun, parkedCars } = buildWorld(scene);
   const roadster = buildRoadster();
   scene.add(roadster);
   const vapor = createVapor(scene);
@@ -341,7 +343,8 @@ export function createRoadsterScene(canvas: HTMLCanvasElement): RoadsterScene {
 
   const update = (state: SimState, effects: SceneEffects, dt: number) => {
     const { position, orientation, heading } = state;
-    roadster.position.set(position.x, position.y, position.z);
+    roadster.position.set(position.x, position.y + state.suspension, position.z);
+    state.obstacles.forEach((obstacle, index) => parkedCars[index]?.position.set(obstacle.x, 0, obstacle.z));
     roadster.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
     roadster.updateMatrixWorld();
     sun.target.position.set(position.x, 0, position.z);

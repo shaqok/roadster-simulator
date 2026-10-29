@@ -220,48 +220,61 @@ describe("주차 차량 충돌", () => {
     velocity: { x: 0, y: 0, z: speed },
   });
 
-  const observe = (start: SimState, seconds: number, input: Partial<ControlInput> = {}) => {
+  const observe = (start: SimState, seconds: number) => {
     const modes = new Set<string>();
-    let maxZ = -Infinity;
-    let minVelocityZ = Infinity;
+    let passedThrough = false;
     const end = run(start, seconds, (s) => {
       modes.add(s.mode);
-      maxZ = Math.max(maxZ, s.position.z);
-      minVelocityZ = Math.min(minVelocityZ, s.velocity.z);
-      return input;
+      if (s.position.z >= s.obstacles[0].z) passedThrough = true;
+      return {};
     });
-    return { end, modes, maxZ, minVelocityZ };
+    return { end, modes, passedThrough };
   };
 
-  it("빠르게 달려 부딪히면 통과하지 못하고 튕겨 나오며 구른 뒤 멈춘다", () => {
-    const { end, modes, maxZ, minVelocityZ } = observe(nearCars(62, 25), 8);
+  const startZ = createSimulation().obstacles.map((o) => o.z);
+
+  it("빠르게 달려 부딪히면 차는 통과하지 못하고 주차 차량을 앞으로 밀어낸다", () => {
+    const { end, modes, passedThrough } = observe(nearCars(62, 25), 6);
 
     expect(modes.has("tumbling")).toBe(true);
-    expect(maxZ).toBeLessThan(77.5);
-    expect(minVelocityZ).toBeLessThan(-1);
-    expect(["driving", "overturned"]).toContain(end.mode);
+    expect(passedThrough).toBe(false);
+    expect(end.obstacles[0].z).toBeGreaterThan(startZ[0] + 1.5);
   });
 
-  it("약하게 닿으면 살짝 밀려난 뒤 다시 주행 입력에 반응한다", () => {
-    const { end, maxZ } = observe(nearCars(70, 3), 6);
-    expect(maxZ).toBeLessThan(77.5);
+  it("맨 앞 차가 밀리면 뒤에 세워 둔 차들도 함께 밀려난다", () => {
+    const { end } = observe(nearCars(62, 25), 8);
+
+    expect(end.obstacles[4].z).toBeGreaterThan(startZ[4] + 0.5);
+  });
+
+  it("밀려난 차량은 마찰로 서서히 멈추고 서로 겹치지 않는다", () => {
+    const { end } = observe(nearCars(62, 25), 20);
+
+    for (const o of end.obstacles) expect(Math.hypot(o.vx, o.vz)).toBeLessThan(0.1);
+    for (let i = 1; i < end.obstacles.length; i++) {
+      expect(end.obstacles[i].z - end.obstacles[i - 1].z).toBeGreaterThan(4.4);
+    }
+  });
+
+  it("약하게 닿으면 거의 밀리지 않고 차는 다시 주행 입력에 반응한다", () => {
+    const { end } = observe(nearCars(70, 3), 6);
+    expect(end.obstacles[0].z - startZ[0]).toBeLessThan(0.6);
     expect(end.mode).toBe("driving");
 
     const driven = run(end, 1, { throttle: -1 });
     expect(speedOf(driven)).toBeGreaterThan(1);
   });
 
-  it("공중에서 옆면에 부딪혀도 통과하지 않고 튕겨 떨어진다", () => {
+  it("공중에서 옆면에 부딪혀도 통과하지 않는다", () => {
     const flying: SimState = {
       ...nearCars(68, 20),
       mode: "airborne",
       position: { x: 0, y: 0.9, z: 68 },
     };
-    const { end, modes, maxZ } = observe(flying, 8);
+    const { modes, passedThrough } = observe(flying, 8);
 
     expect(modes.has("tumbling")).toBe(true);
-    expect(maxZ).toBeLessThan(77.5);
-    expect(["driving", "overturned"]).toContain(end.mode);
+    expect(passedThrough).toBe(false);
   });
 
   it("차 지붕 위에는 반듯하게 내려앉아 계속 달릴 수 있다", () => {
@@ -274,6 +287,51 @@ describe("주차 차량 충돌", () => {
 
     expect(landed.mode).toBe("driving");
     expect(landed.position.y).toBeCloseTo(1.5, 1);
+  });
+});
+
+describe("착지 덜컹임", () => {
+  const dropFrom = (height: number) => {
+    const fall: SimState = {
+      ...openField(),
+      mode: "airborne",
+      position: { x: 60, y: height, z: -100 },
+      velocity: { x: 0, y: 0, z: 10 },
+    };
+    let lowest = 0;
+    let highest = 0;
+    const end = run(fall, 5, (s) => {
+      lowest = Math.min(lowest, s.suspension);
+      highest = Math.max(highest, s.suspension);
+      return {};
+    });
+    return { end, lowest, highest };
+  };
+
+  it("반듯하게 떨어지면 차체가 눌렸다가 되돌아오며 덜컹이고 곧 가라앉는다", () => {
+    const { end, lowest, highest } = dropFrom(10);
+
+    expect(lowest).toBeLessThan(-0.05);
+    expect(highest).toBeGreaterThan(0.005);
+    expect(Math.abs(end.suspension)).toBeLessThan(0.01);
+  });
+
+  it("높은 곳에서 떨어질수록 더 많이 눌린다", () => {
+    expect(dropFrom(25).lowest).toBeLessThan(dropFrom(3).lowest);
+  });
+
+  it("덜컹이는 중에도 가속 입력에 바로 반응하고, 평소 주행에서는 덜컹이지 않는다", () => {
+    const fall: SimState = {
+      ...openField(),
+      mode: "airborne",
+      position: { x: 60, y: 10, z: -100 },
+      velocity: { x: 0, y: 0, z: 10 },
+    };
+    const landed = run(fall, 1.6, {});
+    expect(landed.mode).toBe("driving");
+    expect(speedOf(run(landed, 0.5, { throttle: 1 }))).toBeGreaterThan(speedOf(landed));
+
+    expect(run(openField(), 3, { throttle: 1 }).suspension).toBe(0);
   });
 });
 

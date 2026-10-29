@@ -13,6 +13,7 @@ export {
   RAMPS,
   groundHeightAt,
   type Obstacle,
+  type ObstacleState,
   type Ramp,
 } from "./map";
 export type { Quat, Vec3 } from "./vec";

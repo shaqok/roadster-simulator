@@ -1,4 +1,10 @@
-import { OBSTACLES, groundHeightAt, groundNormalAt, rampHeightAt } from "./map";
+import {
+  groundHeightAt,
+  groundNormalAt,
+  rampHeightAt,
+  type Obstacle,
+  type ObstacleState,
+} from "./map";
 import {
   add,
   cross,
@@ -42,6 +48,9 @@ const INVERSE_INERTIA = vec(
 );
 
 const GRAVITY = 9.81;
+// A parked car is a little heavier than the roadster, whose mass is 1 in the solver.
+const OBSTACLE_INVERSE_MASS = 0.9;
+const RESUME_JOLT_RATE = -1.2;
 const RESTITUTION = 0.25;
 const BODY_RESTITUTION = 0.15;
 const BOUNCE_THRESHOLD = 1.5;
@@ -68,11 +77,15 @@ function worldCorner(position: Vec3, orientation: Quat, corner: Vec3): Vec3 {
 }
 
 /** Height of the lowest body corner above the ground beneath it; <= 0 means touching. */
-export function lowestClearance(position: Vec3, orientation: Quat): number {
+export function lowestClearance(
+  position: Vec3,
+  orientation: Quat,
+  obstacles: readonly Obstacle[]
+): number {
   let lowest = Infinity;
   for (const corner of CORNERS) {
     const p = worldCorner(position, orientation, corner);
-    lowest = Math.min(lowest, p.y - groundHeightAt(p.x, p.z));
+    lowest = Math.min(lowest, p.y - groundHeightAt(p.x, p.z, obstacles));
   }
   return lowest;
 }
@@ -82,7 +95,7 @@ function impulseResponse(orientation: Quat, r: Vec3, direction: Vec3): number {
   return 1 + dot(angular, direction);
 }
 
-type Contact = { normal: Vec3; penetration: number; restitution: number };
+type Contact = { normal: Vec3; penetration: number; restitution: number; obstacle?: number };
 
 const UPRIGHT_HANDOFF_COS = Math.cos((20 * Math.PI) / 180);
 const WHEELS_DOWN_CONTACTS = 3;
@@ -92,8 +105,13 @@ const WHEELS_DOWN_CONTACTS = 3;
  * faces the corner is moving into are candidates, because the shallowest face is often the wrong
  * one: the roadster is almost as wide as a parked car, so a head-on hit is barely inside its sides.
  */
-function obstacleContact(p: Vec3, velocity: Vec3): Contact | undefined {
-  for (const o of OBSTACLES) {
+function obstacleContact(
+  p: Vec3,
+  velocity: Vec3,
+  obstacles: readonly Obstacle[]
+): Contact | undefined {
+  for (let index = 0; index < obstacles.length; index++) {
+    const o = obstacles[index];
     const dx = o.sizeX / 2 - Math.abs(p.x - o.x);
     const dz = o.sizeZ / 2 - Math.abs(p.z - o.z);
     const dy = o.height - p.y;
@@ -106,15 +124,21 @@ function obstacleContact(p: Vec3, velocity: Vec3): Contact | undefined {
     ];
     const entered = faces.filter((face) => dot(face.normal, velocity) < 0);
     const candidates = entered.length > 0 ? entered : faces;
-    return candidates.reduce((best, face) => (face.penetration < best.penetration ? face : best));
+    const best = candidates.reduce((a, face) => (face.penetration < a.penetration ? face : a));
+    return { ...best, obstacle: index };
   }
   return undefined;
 }
 
 /** True when a body corner has run into the side of a parked car rather than landing on top of it. */
-export function hitsObstacleSide(position: Vec3, orientation: Quat, velocity: Vec3): boolean {
+export function hitsObstacleSide(
+  position: Vec3,
+  orientation: Quat,
+  velocity: Vec3,
+  obstacles: readonly Obstacle[]
+): boolean {
   return CORNERS.some((corner) => {
-    const contact = obstacleContact(worldCorner(position, orientation, corner), velocity);
+    const contact = obstacleContact(worldCorner(position, orientation, corner), velocity, obstacles);
     return contact !== undefined && contact.normal.y === 0;
   });
 }
@@ -125,6 +149,7 @@ export function hitsObstacleSide(position: Vec3, orientation: Quat, velocity: Ve
  */
 export function stepTumbling(state: SimState, dt: number): SimState {
   let { position, velocity, orientation, angularVelocity } = state;
+  const obstacles: ObstacleState[] = state.obstacles.map((o) => ({ ...o }));
 
   velocity = add(velocity, vec(0, -GRAVITY * dt, 0));
   angularVelocity = scale(angularVelocity, Math.exp(-ANGULAR_DAMPING * dt));
@@ -145,12 +170,12 @@ export function stepTumbling(state: SimState, dt: number): SimState {
     if (groundPenetration >= -CONTACT_MARGIN) {
       touching.push({
         corner,
-        normal: groundNormalAt(p.x, p.z),
+        normal: groundNormalAt(p.x, p.z, obstacles),
         penetration: groundPenetration,
         restitution: RESTITUTION,
       });
     }
-    const body = obstacleContact(p, velocity);
+    const body = obstacleContact(p, velocity, obstacles);
     if (body) touching.push({ corner, ...body });
   }
   const pushedOut = touching.filter((contact) => contact.penetration > 0);
@@ -163,41 +188,65 @@ export function stepTumbling(state: SimState, dt: number): SimState {
   }
 
   const center = add(position, rotate(orientation, CENTER_OF_MASS));
-  const contacts = touching.map(({ corner, normal, restitution }) => {
+  const obstacleVelocity = (index?: number): Vec3 =>
+    index === undefined ? vec(0, 0, 0) : vec(obstacles[index].vx, 0, obstacles[index].vz);
+
+  const contacts = touching.map(({ corner, normal, restitution, obstacle }) => {
     const r = sub(worldCorner(position, orientation, corner), center);
-    const approach = dot(add(velocity, cross(angularVelocity, r)), normal);
+    const relative = sub(add(velocity, cross(angularVelocity, r)), obstacleVelocity(obstacle));
+    const approach = dot(relative, normal);
     const bounce = approach < -BOUNCE_THRESHOLD ? -restitution * approach : 0;
-    return { r, normal, bounce };
+    return { r, normal, bounce, obstacle };
   });
 
   for (let iteration = 0; iteration < SOLVER_ITERATIONS && contacts.length > 0; iteration++) {
     let linear = vec(0, 0, 0);
     let angular = vec(0, 0, 0);
-    for (const { r, normal, bounce } of contacts) {
-      const pointVelocity = add(velocity, cross(angularVelocity, r));
+    const shoved = obstacles.map(() => ({ x: 0, z: 0 }));
+    for (const { r, normal, bounce, obstacle } of contacts) {
+      const pointVelocity = sub(
+        add(velocity, cross(angularVelocity, r)),
+        obstacleVelocity(obstacle)
+      );
       const approach = dot(pointVelocity, normal);
       if (approach >= bounce) continue;
 
-      const normalImpulse = (bounce - approach) / impulseResponse(orientation, r, normal) / contacts.length;
-      const impulse = scale(normal, normalImpulse);
-      linear = add(linear, impulse);
-      angular = add(angular, applyInverseInertia(orientation, cross(r, impulse)));
+      // A shoved parked car shares the impact, so it soaks up part of it instead of the roadster.
+      const otherInverseMass = obstacle === undefined ? 0 : OBSTACLE_INVERSE_MASS;
+      const normalImpulse =
+        (bounce - approach) /
+        (impulseResponse(orientation, r, normal) + otherInverseMass) /
+        contacts.length;
+      let reaction = scale(normal, normalImpulse);
+      linear = add(linear, reaction);
+      angular = add(angular, applyInverseInertia(orientation, cross(r, reaction)));
 
       const slide = sub(pointVelocity, scale(normal, approach));
       const slideSpeed = Math.hypot(slide.x, slide.y, slide.z);
       if (slideSpeed > 1e-4) {
         const tangent = scale(slide, 1 / slideSpeed);
         const frictionImpulse = Math.min(
-          slideSpeed / impulseResponse(orientation, r, tangent) / contacts.length,
+          slideSpeed /
+            (impulseResponse(orientation, r, tangent) + otherInverseMass) /
+            contacts.length,
           FRICTION * normalImpulse
         );
         const friction = scale(tangent, -frictionImpulse);
         linear = add(linear, friction);
         angular = add(angular, applyInverseInertia(orientation, cross(r, friction)));
+        reaction = add(reaction, friction);
+      }
+      if (obstacle !== undefined) {
+        shoved[obstacle].x -= reaction.x * OBSTACLE_INVERSE_MASS;
+        shoved[obstacle].z -= reaction.z * OBSTACLE_INVERSE_MASS;
       }
     }
     velocity = add(velocity, linear);
     angularVelocity = add(angularVelocity, angular);
+    shoved.forEach((delta, index) => {
+      obstacles[index].vx += delta.x;
+      obstacles[index].vz += delta.z;
+    });
   }
 
   const speed = Math.hypot(velocity.x, velocity.y, velocity.z);
@@ -205,7 +254,17 @@ export function stepTumbling(state: SimState, dt: number): SimState {
   const resting = contacts.length > 0 && speed < REST_SPEED && spin < REST_SPIN;
   const restTime = resting ? state.restTime + dt : 0;
 
-  const next: SimState = { ...state, position, velocity, orientation, angularVelocity, restTime };
+  const next: SimState = {
+    ...state,
+    position,
+    velocity,
+    orientation,
+    angularVelocity,
+    restTime,
+    obstacles,
+    suspension: 0,
+    suspensionRate: 0,
+  };
 
   // Give control back as soon as the car is sitting level on its wheels, even if it is still moving.
   const wheelsOnSurface = touching.filter(
@@ -213,7 +272,7 @@ export function stepTumbling(state: SimState, dt: number): SimState {
   ).length;
   const hitSomethingSideways = touching.some((contact) => contact.normal.y < 0.5);
   const up = rotate(orientation, vec(0, 1, 0));
-  const surface = groundNormalAt(position.x, position.z);
+  const surface = groundNormalAt(position.x, position.z, obstacles);
   if (
     wheelsOnSurface >= WHEELS_DOWN_CONTACTS &&
     !hitSomethingSideways &&
@@ -225,23 +284,28 @@ export function stepTumbling(state: SimState, dt: number): SimState {
 }
 
 function resumeDriving(state: SimState): SimState {
-  const normal = groundNormalAt(state.position.x, state.position.z);
+  const normal = groundNormalAt(state.position.x, state.position.z, state.obstacles);
   const forward = rotate(state.orientation, vec(0, 0, 1));
   const heading = Math.hypot(forward.x, forward.z) > 0.5 ? Math.atan2(forward.x, forward.z) : state.heading;
   return {
     ...state,
     mode: "driving",
     heading,
-    position: vec(state.position.x, groundHeightAt(state.position.x, state.position.z), state.position.z),
+    position: vec(
+      state.position.x,
+      groundHeightAt(state.position.x, state.position.z, state.obstacles),
+      state.position.z
+    ),
     velocity: sub(state.velocity, scale(normal, dot(state.velocity, normal))),
     angularVelocity: vec(0, 0, 0),
     restTime: 0,
+    suspensionRate: RESUME_JOLT_RATE,
   };
 }
 
 function settle(state: SimState): SimState {
-  const groundY = groundHeightAt(state.position.x, state.position.z);
-  const normal = groundNormalAt(state.position.x, state.position.z);
+  const groundY = groundHeightAt(state.position.x, state.position.z, state.obstacles);
+  const normal = groundNormalAt(state.position.x, state.position.z, state.obstacles);
   const up = rotate(state.orientation, vec(0, 1, 0));
   const still = { velocity: vec(0, 0, 0), angularVelocity: vec(0, 0, 0), restTime: 0 };
 
