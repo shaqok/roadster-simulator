@@ -1,4 +1,5 @@
 import data from "./data/magok-map.json";
+import { buildRoadNetwork } from "./roads";
 import { createBuildingIndex, type BuildingIndex } from "./world";
 
 export type MapRoad = { c: string; w: number; p: Array<[number, number]> };
@@ -14,6 +15,9 @@ type MagokMap = {
 export const MAGOK_MAP = data as unknown as MagokMap;
 
 export const MAP_ATTRIBUTION = MAGOK_MAP.meta.attribution;
+
+/** The roads cars can drive on, split into stretches between junctions. */
+export const MAGOK_NETWORK = buildRoadNetwork(MAGOK_MAP.roads);
 
 export function createMagokBuildings(): BuildingIndex {
   return createBuildingIndex(

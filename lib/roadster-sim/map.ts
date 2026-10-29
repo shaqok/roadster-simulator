@@ -1,30 +1,52 @@
+import { MAP_HALF_SIZE } from "./bounds";
+import { MAGOK_NETWORK, createMagokBuildings } from "./magok";
+import { JUMP_RAMP_COUNT, placeJumpRamps, rampLocal, rampZone, type Ramp } from "./ramps";
+import type { ClosedZone } from "./roads";
 import { normalize, vec, type Vec3 } from "./vec";
 import { buildingHeightAt, type BuildingIndex } from "./world";
 
-/** Half-size of the playable square, in meters. Beyond it the car is lost. */
-export const MAP_HALF_SIZE = 700;
+export { MAP_HALF_SIZE };
+export type { Ramp };
 
-/** Ramp rising along +z from `z0`, `length` long, `height` tall at its far edge, then a sheer drop. */
-export type Ramp = { x: number; z0: number; length: number; width: number; height: number };
-
-/** Axis-aligned parked vehicle that can be driven onto from above but not through. */
-export type Obstacle = { x: number; z: number; sizeX: number; sizeZ: number; height: number };
+/**
+ * A vehicle that can be driven onto from above but not through. `heading` turns its length (`sizeZ`)
+ * away from +z; parked cars leave it out.
+ */
+export type Obstacle = {
+  x: number;
+  z: number;
+  sizeX: number;
+  sizeZ: number;
+  height: number;
+  heading?: number;
+};
 
 /** A parked vehicle that can be shoved: it slides in a straight line and is slowed by friction. */
 export type ObstacleState = Obstacle & { vx: number; vz: number };
 
-/** Everything solid that the ground height and collisions depend on. */
-export type Solids = { obstacles: readonly Obstacle[]; buildings: BuildingIndex };
+/**
+ * Everything solid that the ground height and collisions depend on. Parked cars slide when shoved;
+ * traffic cars keep to their own path whatever hits them.
+ */
+export type Solids = {
+  obstacles: readonly Obstacle[];
+  traffic?: readonly ObstacleState[];
+  buildings: BuildingIndex;
+};
 
 export function createObstacles(): ObstacleState[] {
   return OBSTACLES.map((o) => ({ ...o, vx: 0, vz: 0 }));
 }
 
+const START_RAMP: Ramp = { x: 0, z0: 40, length: 20, width: 9, height: 4 };
+
+/** The ramp in front of the start, then jump ramps spread along the roads. */
 export const RAMPS: readonly Ramp[] = [
-  { x: 0, z0: 40, length: 20, width: 9, height: 4 },
+  START_RAMP,
+  ...placeJumpRamps(MAGOK_NETWORK, createMagokBuildings(), [START_RAMP], JUMP_RAMP_COUNT),
 ];
 
-const PARKED_CAR = { sizeX: 2, sizeZ: 4.5, height: 1.5 };
+export const PARKED_CAR = { sizeX: 2, sizeZ: 4.5, height: 1.5 };
 
 /** Five parked vehicles end to end, straight beyond the ramp. */
 export const OBSTACLES: readonly Obstacle[] = Array.from({ length: 5 }, (_, i) => ({
@@ -33,42 +55,78 @@ export const OBSTACLES: readonly Obstacle[] = Array.from({ length: 5 }, (_, i) =
   ...PARKED_CAR,
 }));
 
+/** Traffic keeps off the start stretch (behind the car, the ramp and the parked cars) and off every ramp. */
+const START_ZONE: ClosedZone = { x: 0, z: 0, heading: 0, from: -12, to: 110, halfWidth: 7.5 };
+export const CLOSED_ZONES: readonly ClosedZone[] = [START_ZONE, ...RAMPS.map(rampZone)];
+
+function rampAt(x: number, z: number) {
+  for (const ramp of RAMPS) {
+    const local = rampLocal(ramp, x, z);
+    if (local && Math.abs(local.across) <= ramp.width / 2 && local.along >= 0 && local.along <= ramp.length) {
+      return { ramp, along: local.along };
+    }
+  }
+  return undefined;
+}
+
 export function rampHeightAt(x: number, z: number): number {
   let height = 0;
   for (const ramp of RAMPS) {
-    if (Math.abs(x - ramp.x) <= ramp.width / 2 && z >= ramp.z0 && z <= ramp.z0 + ramp.length) {
-      height = Math.max(height, (ramp.height * (z - ramp.z0)) / ramp.length);
+    const local = rampLocal(ramp, x, z);
+    if (local && Math.abs(local.across) <= ramp.width / 2 && local.along >= 0 && local.along <= ramp.length) {
+      height = Math.max(height, (ramp.height * local.along) / ramp.length);
     }
   }
   return height;
 }
+
+/** A point in the vehicle's own frame: `across` to one side, `along` its length. */
+export function obstacleLocal(o: Obstacle, x: number, z: number): { across: number; along: number } {
+  const dx = x - o.x;
+  const dz = z - o.z;
+  const heading = o.heading ?? 0;
+  if (heading === 0) return { across: dx, along: dz };
+  const sin = Math.sin(heading);
+  const cos = Math.cos(heading);
+  return { across: dx * cos - dz * sin, along: dx * sin + dz * cos };
+}
+
+/** Farther than this from a vehicle's center, a point cannot be inside it. */
+export const OBSTACLE_REACH = 3;
 
 export function obstacleAt(
   x: number,
   z: number,
   obstacles: readonly Obstacle[]
 ): Obstacle | undefined {
-  return obstacles.find(
-    (o) => Math.abs(x - o.x) <= o.sizeX / 2 && Math.abs(z - o.z) <= o.sizeZ / 2
-  );
+  return obstacles.find((o) => {
+    if (Math.abs(x - o.x) > OBSTACLE_REACH || Math.abs(z - o.z) > OBSTACLE_REACH) return false;
+    const { across, along } = obstacleLocal(o, x, z);
+    return Math.abs(across) <= o.sizeX / 2 && Math.abs(along) <= o.sizeZ / 2;
+  });
+}
+
+function solidObstacleAt(x: number, z: number, solids: Solids): Obstacle | undefined {
+  return obstacleAt(x, z, solids.obstacles) ?? (solids.traffic && obstacleAt(x, z, solids.traffic));
 }
 
 export function groundHeightAt(x: number, z: number, solids: Solids): number {
   return Math.max(
     rampHeightAt(x, z),
-    obstacleAt(x, z, solids.obstacles)?.height ?? 0,
+    solidObstacleAt(x, z, solids)?.height ?? 0,
     buildingHeightAt(solids.buildings, x, z)
   );
 }
 
 export function groundNormalAt(x: number, z: number, solids: Solids): Vec3 {
-  if (obstacleAt(x, z, solids.obstacles) || buildingHeightAt(solids.buildings, x, z) > 0) {
+  if (solidObstacleAt(x, z, solids) || buildingHeightAt(solids.buildings, x, z) > 0) {
     return vec(0, 1, 0);
   }
-  for (const ramp of RAMPS) {
-    if (Math.abs(x - ramp.x) <= ramp.width / 2 && z >= ramp.z0 && z <= ramp.z0 + ramp.length) {
-      return normalize(vec(0, 1, -ramp.height / ramp.length));
-    }
+  const onRamp = rampAt(x, z);
+  if (onRamp) {
+    const slope = onRamp.ramp.height / onRamp.ramp.length;
+    const heading = onRamp.ramp.heading ?? 0;
+    return normalize(vec(-slope * Math.sin(heading), 1, -slope * Math.cos(heading)));
   }
   return vec(0, 1, 0);
 }

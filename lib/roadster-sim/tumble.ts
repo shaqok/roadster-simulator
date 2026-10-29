@@ -1,6 +1,8 @@
 import {
+  OBSTACLE_REACH,
   groundHeightAt,
   groundNormalAt,
+  obstacleLocal,
   rampHeightAt,
   type ObstacleState,
   type Solids,
@@ -103,28 +105,47 @@ const UPRIGHT_HANDOFF_COS = Math.cos((20 * Math.PI) / 180);
 const WHEELS_DOWN_CONTACTS = 3;
 
 /**
- * A body corner that is inside a parked car, with the face it should be pushed out through. Only
- * faces the corner is moving into are candidates, because the shallowest face is often the wrong
- * one: the roadster is almost as wide as a parked car, so a head-on hit is barely inside its sides.
+ * A body corner that is inside a parked or traffic car, with the face it should be pushed out
+ * through. Only faces the corner is moving into are candidates, because the shallowest face is often
+ * the wrong one: the roadster is almost as wide as a car, so a head-on hit is barely inside its
+ * sides. Traffic cars come after the parked ones in the contact index, and their motion counts.
  */
 function obstacleContact(p: Vec3, velocity: Vec3, solids: Solids): Contact | undefined {
-  const { obstacles } = solids;
-  for (let index = 0; index < obstacles.length; index++) {
-    const o = obstacles[index];
-    const dx = o.sizeX / 2 - Math.abs(p.x - o.x);
-    const dz = o.sizeZ / 2 - Math.abs(p.z - o.z);
+  const parked = solids.obstacles.length;
+  const traffic = solids.traffic ?? [];
+  for (let index = 0; index < parked + traffic.length; index++) {
+    const moving = index >= parked;
+    const o = moving ? traffic[index - parked] : solids.obstacles[index];
+    if (Math.abs(p.x - o.x) > OBSTACLE_REACH || Math.abs(p.z - o.z) > OBSTACLE_REACH) continue;
+    const { across, along } = obstacleLocal(o, p.x, p.z);
+    const dAcross = o.sizeX / 2 - Math.abs(across);
+    const dAlong = o.sizeZ / 2 - Math.abs(along);
     const dy = o.height - p.y;
-    if (dx <= 0 || dz <= 0 || dy <= 0) continue;
+    if (dAcross <= 0 || dAlong <= 0 || dy <= 0) continue;
 
+    const heading = o.heading ?? 0;
+    const sideSign = Math.sign(across) || 1;
+    const endSign = Math.sign(along) || 1;
     const faces: Contact[] = [
       { normal: vec(0, 1, 0), penetration: dy, restitution: RESTITUTION },
-      { normal: vec(Math.sign(p.x - o.x), 0, 0), penetration: dx, restitution: BODY_RESTITUTION },
-      { normal: vec(0, 0, Math.sign(p.z - o.z)), penetration: dz, restitution: BODY_RESTITUTION },
+      {
+        normal: vec(Math.cos(heading) * sideSign, 0, -Math.sin(heading) * sideSign),
+        penetration: dAcross,
+        restitution: BODY_RESTITUTION,
+      },
+      {
+        normal: vec(Math.sin(heading) * endSign, 0, Math.cos(heading) * endSign),
+        penetration: dAlong,
+        restitution: BODY_RESTITUTION,
+      },
     ];
+    const approach = moving
+      ? vec(velocity.x - (o as ObstacleState).vx, velocity.y, velocity.z - (o as ObstacleState).vz)
+      : velocity;
     // A corner cannot have gone deeper than a step of travel, so a far face it is moving "into"
     // (the back of the car after a bounce) is not the one it crossed.
     const entered = faces.filter(
-      (face) => dot(face.normal, velocity) < 0 && face.penetration <= MAX_ENTRY_DEPTH
+      (face) => dot(face.normal, approach) < 0 && face.penetration <= MAX_ENTRY_DEPTH
     );
     const candidates = entered.length > 0 ? entered : faces;
     const best = candidates.reduce((a, face) => (face.penetration < a.penetration ? face : a));
@@ -162,7 +183,8 @@ export function hitsObstacleSide(
 export function stepTumbling(state: SimState, dt: number): SimState {
   let { position, velocity, orientation, angularVelocity } = state;
   const obstacles: ObstacleState[] = state.obstacles.map((o) => ({ ...o }));
-  const solids: Solids = { obstacles, buildings: state.buildings };
+  const traffic = state.traffic;
+  const solids: Solids = { obstacles, traffic, buildings: state.buildings };
 
   velocity = add(velocity, vec(0, -GRAVITY * dt, 0));
   angularVelocity = scale(angularVelocity, Math.exp(-ANGULAR_DAMPING * dt));
@@ -201,8 +223,11 @@ export function stepTumbling(state: SimState, dt: number): SimState {
   }
 
   const center = add(position, rotate(orientation, CENTER_OF_MASS));
-  const obstacleVelocity = (index?: number): Vec3 =>
-    index === undefined ? vec(0, 0, 0) : vec(obstacles[index].vx, 0, obstacles[index].vz);
+  const obstacleVelocity = (index?: number): Vec3 => {
+    if (index === undefined) return vec(0, 0, 0);
+    const body = index < obstacles.length ? obstacles[index] : traffic[index - obstacles.length];
+    return vec(body.vx, 0, body.vz);
+  };
 
   const contacts = touching.map(({ corner, normal, restitution, obstacle }) => {
     const r = sub(worldCorner(position, orientation, corner), center);
@@ -225,7 +250,9 @@ export function stepTumbling(state: SimState, dt: number): SimState {
       if (approach >= bounce) continue;
 
       // A shoved parked car shares the impact, so it soaks up part of it instead of the roadster.
-      const otherInverseMass = obstacle === undefined ? 0 : OBSTACLE_INVERSE_MASS;
+      // Traffic cars keep their course, so the roadster takes the whole impact.
+      const shovable = obstacle !== undefined && obstacle < obstacles.length;
+      const otherInverseMass = shovable ? OBSTACLE_INVERSE_MASS : 0;
       const normalImpulse =
         (bounce - approach) /
         (impulseResponse(orientation, r, normal) + otherInverseMass) /
@@ -249,7 +276,7 @@ export function stepTumbling(state: SimState, dt: number): SimState {
         angular = add(angular, applyInverseInertia(orientation, cross(r, friction)));
         reaction = add(reaction, friction);
       }
-      if (obstacle !== undefined) {
+      if (shovable) {
         shoved[obstacle].x -= reaction.x * OBSTACLE_INVERSE_MASS;
         shoved[obstacle].z -= reaction.z * OBSTACLE_INVERSE_MASS;
       }
@@ -297,7 +324,7 @@ export function stepTumbling(state: SimState, dt: number): SimState {
 }
 
 function solidsOf(state: SimState): Solids {
-  return { obstacles: state.obstacles, buildings: state.buildings };
+  return { obstacles: state.obstacles, traffic: state.traffic, buildings: state.buildings };
 }
 
 function resumeDriving(state: SimState): SimState {

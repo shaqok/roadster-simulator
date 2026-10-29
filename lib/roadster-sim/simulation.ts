@@ -1,4 +1,5 @@
 import {
+  CLOSED_ZONES,
   MAP_HALF_SIZE,
   advanceObstacles,
   createObstacles,
@@ -7,6 +8,8 @@ import {
   type ObstacleState,
   type Solids,
 } from "./map";
+import { EMPTY_ROADS, type RoadNetwork } from "./roads";
+import { advanceTraffic, spawnTraffic, type TrafficCar, type TrafficPin } from "./traffic";
 import { NO_BUILDINGS, type BuildingIndex } from "./world";
 import { CENTER_OF_MASS, hitsObstacleSide, lowestClearance, stepTumbling } from "./tumble";
 import {
@@ -50,6 +53,10 @@ export type SimState = {
   obstacles: ObstacleState[];
   /** Static buildings the car collides with and can land on. Shared, never modified. */
   buildings: BuildingIndex;
+  /** Roads the traffic drives on. Shared, never modified. */
+  roads: RoadNetwork;
+  /** Cars driving themselves along the roads. They never react to the roadster. */
+  traffic: TrafficCar[];
   /** Vertical body offset from the wheels in meters (negative = compressed) and its rate. */
   suspension: number;
   suspensionRate: number;
@@ -103,7 +110,18 @@ const MAX_SUSPENSION_TRAVEL = 0.3;
 const JOLT_RATE_PER_IMPACT_SPEED = 0.12;
 const MAX_JOLT_RATE = 3;
 
-export function createSimulation(options: { buildings?: BuildingIndex } = {}): SimState {
+/** Traffic cars waiting on the start road, so cars are in view as soon as the page opens. */
+const START_TRAFFIC: readonly TrafficPin[] = [
+  { x: 0, z: 150, heading: Math.PI, lane: 0 },
+  { x: 0, z: 190, heading: Math.PI, lane: 1 },
+  { x: 0, z: 130, heading: 0, lane: 0 },
+  { x: 0, z: -80, heading: 0, lane: 0 },
+];
+
+export function createSimulation(
+  options: { buildings?: BuildingIndex; roads?: RoadNetwork; traffic?: TrafficCar[] } = {}
+): SimState {
+  const roads = options.roads ?? EMPTY_ROADS;
   return {
     mode: "driving",
     position: vec(0, 0, 0),
@@ -115,6 +133,10 @@ export function createSimulation(options: { buildings?: BuildingIndex } = {}): S
     thrustAir: 1,
     obstacles: createObstacles(),
     buildings: options.buildings ?? NO_BUILDINGS,
+    roads,
+    traffic:
+      options.traffic ??
+      spawnTraffic(roads, CLOSED_ZONES, { pins: START_TRAFFIC, buildings: options.buildings }),
     suspension: 0,
     suspensionRate: 0,
   };
@@ -127,10 +149,16 @@ export function bodyAxes(state: SimState): { forward: Vec3; up: Vec3; right: Vec
 }
 
 export function stepSimulation(state: SimState, input: ControlInput, dt: number): SimState {
-  if (input.reset) return createSimulation({ buildings: state.buildings });
+  if (input.reset) {
+    return createSimulation({ buildings: state.buildings, roads: state.roads, traffic: state.traffic });
+  }
 
   const next = stepCar(state, input, dt);
-  return { ...next, obstacles: advanceObstacles(next.obstacles, dt) };
+  return {
+    ...next,
+    obstacles: advanceObstacles(next.obstacles, dt),
+    traffic: advanceTraffic(next.traffic, next.roads, CLOSED_ZONES, dt),
+  };
 }
 
 function stepCar(state: SimState, input: ControlInput, dt: number): SimState {
@@ -150,7 +178,7 @@ function stepCar(state: SimState, input: ControlInput, dt: number): SimState {
 }
 
 function solidsOf(state: SimState): Solids {
-  return { obstacles: state.obstacles, buildings: state.buildings };
+  return { obstacles: state.obstacles, traffic: state.traffic, buildings: state.buildings };
 }
 
 function headingVector(heading: number): Vec3 {
