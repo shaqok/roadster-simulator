@@ -3,14 +3,19 @@ import { expect, test } from "vitest";
 
 import Home from "@/app/page";
 
-test("홈 화면은 시작 안내 제목과 배포 링크를 보여준다", () => {
+test("홈 화면은 접속 즉시 시뮬레이터의 상태 표시와 조작 안내를 보여준다", () => {
   render(<Home />);
 
-  expect(
-    screen.getByRole("heading", { level: 1, name: /To get started/i })
-  ).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: /Deploy Now/i })).toHaveAttribute(
+  expect(screen.getByRole("heading", { level: 1, name: /Roadster Simulator/i })).toBeInTheDocument();
+  expect(screen.getByTestId("mode")).toHaveTextContent("주행");
+  expect(screen.getByRole("progressbar", { name: "추진 공기" })).toHaveAttribute(
+    "aria-valuenow",
+    "100"
+  );
+  expect(screen.getByRole("button", { name: "재시작" })).toBeInTheDocument();
+  expect(screen.getByText("Space")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "© OpenStreetMap contributors" })).toHaveAttribute(
     "href",
-    expect.stringContaining("vercel.com/new")
+    "https://www.openstreetmap.org/copyright"
   );
 });
